@@ -199,6 +199,46 @@ Frontend (`frontend/.env`):
 - `POST /api/workflow/character`
 - `POST /api/workflow/session/message`
 
+## Debugging Without Frontend
+
+Use the standalone scripts in `/tests` to validate backend components without running FastAPI or React UI.
+
+1. Test MongoDB connection, index creation, insert/read cleanup:
+
+```bash
+python tests/test_database.py
+```
+
+2. Test Chroma vector store add/query/reset:
+
+```bash
+python tests/test_vector_store.py
+```
+
+3. Test deterministic script parsing and page tracking:
+
+```bash
+python tests/test_script_parser.py
+```
+
+4. Test LangGraph agent single-turn flow (prompt, retrieval, response, state update):
+
+```bash
+python tests/test_agent_graph.py
+```
+
+5. Test RAG pipeline (query generation + vector retrieval output):
+
+```bash
+python tests/test_rag_pipeline.py
+```
+
+6. Run all tests sequentially with summary:
+
+```bash
+python tests/run_all_tests.py
+```
+
 ## Future Improvements
 
 1. Replace heuristic fallback parser with robust structured extraction prompt + schema validation retries.
