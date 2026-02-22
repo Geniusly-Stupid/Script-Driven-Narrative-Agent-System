@@ -20,6 +20,9 @@ narrative.db
 # Streamlit cache
 .streamlit/
 
+# Local secrets
+api_key.txt
+
 # OS files
 .DS_Store
 Thumbs.db

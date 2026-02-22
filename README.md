@@ -151,6 +151,20 @@ This separation keeps deterministic state operations isolated from semantic sear
 
 ## Setup
 
+Before running the project, get an API key from:
+
+[https://build.nvidia.com/settings/api-keys](https://build.nvidia.com/settings/api-keys)
+
+Then create a file named:
+
+```bash
+api_key.txt
+```
+
+Place it in the project root directory and paste your API key inside (only the key, no extra spaces, utf-8 encoding).
+
+Once the API key is set up, create and activate a virtual environment:
+
 ```bash
 python -m venv .venv
 . .venv/Scripts/activate  # Windows PowerShell: .\.venv\Scripts\Activate.ps1
@@ -170,3 +184,35 @@ Open the URL shown by Streamlit (usually `http://localhost:8501`).
 - This project is designed for local standalone execution.
 - All state is persisted locally (`narrative.db` and `.chroma/`).
 - No API server is required.
+
+## Debug Scripts
+
+A new `test/` directory has been added.
+These scripts all use **mock inputs + print outputs**, allowing you to manually verify whether the results match expectations.
+
+Directory contents (each file except `app/ui.py` has a corresponding test):
+
+* `test/test_init.py`: Tests importing `app/__init__.py`
+* `test/test_database.py`: Tests `app/database.py` (database creation, insert, read, state updates)
+* `test/test_parser.py`: Tests `app/parser.py` (mock page parsing for Scene/Plot)
+* `test/test_rag.py`: Tests `app/rag.py` (query generation and knowledge classification)
+* `test/test_state.py`: Tests `app/state.py` (plot/scene progression and transitions)
+* `test/test_vector_store.py`: Tests `app/vector_store.py` (insertion and retrieval)
+* `test/test_agent_graph.py`: Tests `app/agent_graph.py` (complete single-turn workflow)
+* `test/test_main.py`: Tests `main.py` import and entry-point availability
+* `test/run_all.py`: Executes all test scripts sequentially
+
+Run individually:
+
+```bash
+python test/test_database.py
+python test/test_parser.py
+python test/test_agent_graph.py
+```
+
+Run all at once:
+
+```bash
+python test/run_all.py
+```
+
