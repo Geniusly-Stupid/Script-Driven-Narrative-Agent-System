@@ -183,7 +183,6 @@ Open the URL shown by Streamlit (usually `http://localhost:8501`).
 
 - This project is designed for local standalone execution.
 - All state is persisted locally (`narrative.db` and `.chroma/`).
-- No API server is required.
 
 ## Debug Scripts
 
@@ -192,6 +191,13 @@ These scripts all use **mock inputs + print outputs**, allowing you to manually 
 
 Directory contents (each file except `app/ui.py` has a corresponding test):
 
+* `test/test_llm_generate.py`: Tests the raw LLM API call (streaming behavior, thinking/reasoning/content parsing).
+  
+  ⚠️ **Before running this test, make sure `api_key.txt` has been created and configured as described in the Setup section.**
+
+  ⚠️ **All LLM invocation logic in the project must stay aligned with this file.**
+
+  Any changes to request payload, headers, or streaming parsing should be validated here first.
 * `test/test_init.py`: Tests importing `app/__init__.py`
 * `test/test_database.py`: Tests `app/database.py` (database creation, insert, read, state updates)
 * `test/test_parser.py`: Tests `app/parser.py` (mock page parsing for Scene/Plot)
@@ -205,6 +211,7 @@ Directory contents (each file except `app/ui.py` has a corresponding test):
 Run individually:
 
 ```bash
+python test/test_llm_generate.py
 python test/test_database.py
 python test/test_parser.py
 python test/test_agent_graph.py
