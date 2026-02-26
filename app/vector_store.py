@@ -4,50 +4,72 @@ import hashlib
 import math
 import os
 import shutil
-from typing import Iterable
+from typing import Iterable, List
 
 import chromadb
 from chromadb.config import Settings
+import re
+
+from sentence_transformers import SentenceTransformer
 
 
-class DeterministicEmbedding:
-    dim = 128
+class ModelEmbedding:
+    _model = None
 
-    def _embed_text(self, text: str) -> list[float]:
-        vec = [0.0] * self.dim
-        tokens = [t.lower() for t in text.split() if t.strip()]
-        if not tokens:
-            return vec
-        for token in tokens:
-            digest = hashlib.sha256(token.encode('utf-8')).digest()
-            for i in range(self.dim):
-                vec[i] += digest[i % len(digest)] / 255.0
-        norm = math.sqrt(sum(v * v for v in vec))
-        return [v / norm for v in vec] if norm else vec
+    def __init__(self):
+        if ModelEmbedding._model is None:
+            ModelEmbedding._model = SentenceTransformer("intfloat/multilingual-e5-base")
+        self.model = ModelEmbedding._model
 
-    def __call__(self, input: Iterable[str]) -> list[list[float]]:
-        return [self._embed_text(text) for text in input]
+    # ----------------------------
+    # Preprocess for E5 format
+    # ----------------------------
+    def _prepare_text(self, text: str) -> str:
+        lang = self._detect_language(text)
+
+        # E5 family models expect special prefix
+        # query: for search query
+        # passage: for documents
+
+        # Here we default to passage format
+        # embed_query() will override to query
+        return text.strip()
+
+    # ----------------------------
+    # Core embedding
+    # ----------------------------
+    def _embed(self, texts: List[str], prefix: str) -> List[List[float]]:
+        processed = [f"{prefix}: {t.strip()}" for t in texts]
+        embeddings = self.model.encode(
+            processed,
+            normalize_embeddings=True
+        )
+        return embeddings.tolist()
+
+    # ----------------------------
+    # Chroma compatible API
+    # ----------------------------
+    def __call__(self, input: Iterable[str]) -> List[List[float]]:
+        return self.embed_documents(list(input))
 
     def name(self) -> str:
-        return 'deterministic_hash_v1'
+        return "multilingual_e5_base"
 
-    # Chroma v0.5+ embedding API compatibility
-    def embed_query(self, input: str | list[str]) -> list[float] | list[list[float]]:
+    def embed_query(self, input: str | List[str]):
         if isinstance(input, list):
-            return [self._embed_text(text) for text in input]
-        return self._embed_text(input)
+            return self._embed(input, prefix="query")
+        return self._embed([input], prefix="query")[0]
 
-    def embed_documents(self, input: list[str]) -> list[list[float]]:
-        return [self._embed_text(text) for text in input]
+    def embed_documents(self, input: List[str]) -> List[List[float]]:
+        return self._embed(input, prefix="passage")
 
 
 class ChromaStore:
     def __init__(self, path: str = '.chroma') -> None:
-        self.embedding_fn = DeterministicEmbedding()
+        self.embedding_fn = ModelEmbedding()
         self.client = self._init_client(path)
         self.collection = self.client.get_or_create_collection(
             name='narrative_knowledge',
-            embedding_function=self.embedding_fn,
             metadata={'hnsw:space': 'cosine'},
         )
 
@@ -94,14 +116,24 @@ class ChromaStore:
         if not docs:
             return
         ids = [f"{d['type']}::{d['name']}::{i}" for i, d in enumerate(docs)]
+        embeddings = self.embedding_fn.embed_documents(
+            [d['description'] for d in docs]
+        )
         self.collection.add(
             ids=ids,
             documents=[d['description'] for d in docs],
             metadatas=[d['metadata'] | {'type': d['type'], 'name': d['name']} for d in docs],
+            embeddings=embeddings
         )
 
     def search(self, query: str, k: int = 5) -> list[dict]:
-        result = self.collection.query(query_texts=[query], n_results=k)
+        query_embedding = self.embedding_fn.embed_query(query)
+
+        result = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=k
+        )
+        
         out = []
         for doc, meta, dist in zip(
             result.get('documents', [[]])[0],
