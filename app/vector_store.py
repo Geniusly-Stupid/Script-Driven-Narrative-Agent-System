@@ -2,9 +2,12 @@
 
 import hashlib
 import math
+import os
+import shutil
 from typing import Iterable
 
 import chromadb
+from chromadb.config import Settings
 
 
 class DeterministicEmbedding:
@@ -28,11 +31,20 @@ class DeterministicEmbedding:
     def name(self) -> str:
         return 'deterministic_hash_v1'
 
+    # Chroma v0.5+ embedding API compatibility
+    def embed_query(self, input: str | list[str]) -> list[float] | list[list[float]]:
+        if isinstance(input, list):
+            return [self._embed_text(text) for text in input]
+        return self._embed_text(input)
+
+    def embed_documents(self, input: list[str]) -> list[list[float]]:
+        return [self._embed_text(text) for text in input]
+
 
 class ChromaStore:
     def __init__(self, path: str = '.chroma') -> None:
-        self.client = chromadb.PersistentClient(path=path)
         self.embedding_fn = DeterministicEmbedding()
+        self.client = self._init_client(path)
         self.collection = self.client.get_or_create_collection(
             name='narrative_knowledge',
             embedding_function=self.embedding_fn,
@@ -49,6 +61,25 @@ class ChromaStore:
             embedding_function=self.embedding_fn,
             metadata={'hnsw:space': 'cosine'},
         )
+
+    def _init_client(self, path: str) -> chromadb.PersistentClient:
+        try:
+            return chromadb.PersistentClient(path=path)
+        except BaseException:
+            # If the persistent store is corrupted, recreate it.
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            try:
+                return chromadb.PersistentClient(path=path)
+            except BaseException:
+                # Fallback to explicit Settings-based client creation.
+                settings = Settings(is_persistent=True, persist_directory=path, allow_reset=True)
+                client = chromadb.Client(settings=settings)
+                try:
+                    client.reset()
+                except Exception:
+                    pass
+                return client
 
     def add_from_scenes(self, scenes: list[dict]) -> None:
         docs: list[dict] = []
