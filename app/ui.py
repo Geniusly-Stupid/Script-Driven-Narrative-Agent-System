@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import os
 import streamlit as st
 
 from app.agent_graph import NarrativeAgent
@@ -50,27 +51,38 @@ def run_app() -> None:
             start_page = st.number_input('Start Page', min_value=1, value=1)
             end_page = st.number_input('End Page (0 means auto)', min_value=0, value=0)
             if uploaded and st.button('Parse Script'):
-                pages = read_pdf_pages(uploaded.getvalue(), start_page=int(start_page), end_page=int(end_page) if end_page > 0 else None)
-                scenes = parse_script(pages)
-                db.reset_story_data()
-                vector.reset()
-                db.insert_scenes(scenes)
-                vector.add_from_scenes(scenes)
-                first_scene = scenes[0]
-                first_plot = first_scene['plots'][0]
-                db.update_scene(first_scene['scene_id'], {'status': 'in_progress'})
-                db.update_system_state(
-                    {
-                        'stage': 'parse',
-                        'current_scene_id': first_scene['scene_id'],
-                        'current_plot_id': first_plot['plot_id'],
-                        'plot_progress': 0.0,
-                        'scene_progress': 0.0,
-                        'current_scene_intro': '',
-                    }
-                )
-                st.success('Script parsed and stored.')
-                st.rerun()
+                try:
+                    pages = read_pdf_pages(
+                        uploaded.getvalue(),
+                        start_page=int(start_page),
+                        end_page=int(end_page) if end_page > 0 else None,
+                    )
+                    scenes = parse_script(pages)
+                    if not scenes:
+                        st.error('No scenes extracted. Please check the PDF content or LLM output.')
+                        st.stop()
+                    db.reset_story_data()
+                    vector.reset()
+                    db.insert_scenes(scenes)
+                    vector.add_from_scenes(scenes)
+                    first_scene = scenes[0]
+                    first_plot = first_scene['plots'][0]
+                    db.update_scene(first_scene['scene_id'], {'status': 'in_progress'})
+                    db.update_system_state(
+                        {
+                            'stage': 'parse',
+                            'current_scene_id': first_scene['scene_id'],
+                            'current_plot_id': first_plot['plot_id'],
+                            'plot_progress': 0.0,
+                            'scene_progress': 0.0,
+                            'current_scene_intro': '',
+                        }
+                    )
+                    st.success('Script parsed and stored.')
+                    st.rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f'Parse failed: {exc}')
+                    st.stop()
 
         elif stage == 'parse':
             st.markdown('### 2) Review Scene Structure')
