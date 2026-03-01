@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import random
 import re
 from typing import Any, TypedDict
@@ -7,6 +8,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, StateGraph
 
 from app.database import Database
+from app.llm_client import call_nvidia_llm
 from app.rag import categorize_docs, generate_retrieval_queries
 from app.state import evaluate_plot_completion, evaluate_scene_completion, next_story_position
 from app.vector_store import ChromaStore
@@ -149,6 +151,8 @@ Requirements:
 - Preserve immersion.
 """
 
+KP_OPENING_MARKER = '[KP_OPENING]'
+
 
 class NarrativeState(TypedDict, total=False):
     scene_id: str
@@ -220,6 +224,16 @@ class NarrativeAgent:
         }
         return self.graph.invoke(state)
 
+    def ensure_kp_opening(self, scene_id: str, plot_id: str) -> str | None:
+        if not scene_id or not plot_id:
+            return None
+        existing = self.db.get_recent_turns(scene_id, plot_id, limit=1)
+        if existing:
+            return None
+        opening = self._generate_scene_opening(scene_id, plot_id)
+        self.db.append_memory(scene_id, plot_id, KP_OPENING_MARKER, opening)
+        return opening
+
     def build_prompt(self, state: NarrativeState) -> NarrativeState:
         return state
 
@@ -290,20 +304,27 @@ class NarrativeAgent:
         return state
 
     def generate_response(self, state: NarrativeState) -> NarrativeState:
-        user_input = state['latest_user_input']
-        dice_result = self._maybe_roll_dice(user_input)
-        if dice_result:
-            state['dice_result'] = dice_result
-
-        base = f"You act: {user_input}. "
-        if state.get('plot_goal'):
-            base += f"The story advances toward: {state['plot_goal']}. "
-        if state.get('retrieved_docs'):
-            base += f"Relevant clue: {state['retrieved_docs'][0]['content']}. "
-        if dice_result:
-            base += f"Dice result applied ({dice_result}). "
-        base += 'What do you do next?'
-        state['response'] = base
+        try:
+            first_pass = call_nvidia_llm(state['prompt'])
+            tool_spec = self._extract_dice_tool_call(first_pass)
+            if tool_spec:
+                dice_value = self._roll_dice_expr(tool_spec['dice_type'])
+                if dice_value:
+                    state['dice_result'] = f"{tool_spec['dice_type']}: {dice_value} (reason: {tool_spec['reason']})"
+                    follow_prompt = (
+                        f"{state['prompt']}\n\n"
+                        "# TOOL RESULT\n"
+                        f"roll_dice -> {state['dice_result']}\n\n"
+                        "Now generate the final narrative response to the player only. "
+                        "Do not output TOOL_CALL."
+                    )
+                    state['response'] = call_nvidia_llm(follow_prompt).strip()
+                else:
+                    state['response'] = self._clean_tool_call_text(first_pass)
+            else:
+                state['response'] = first_pass.strip()
+        except Exception:
+            state['response'] = self._fallback_response(state)
         return state
 
     def write_memory(self, state: NarrativeState) -> NarrativeState:
@@ -316,23 +337,36 @@ class NarrativeAgent:
             state['response'],
             state.get('plot_progress', 0.0),
             state.get('mandatory_events', []),
+            plot_goal=state.get('plot_goal', ''),
+            scene_goal=state.get('scene_goal', ''),
+            conversation_history=state.get('conversation_history', []),
         )
         state['plot_completed'] = done
         state['plot_progress'] = progress
         self.db.update_plot(state['plot_id'], progress=progress)
         if done:
             self.db.update_plot(state['plot_id'], status='completed', progress=1.0)
-            self.db.save_summary('plot', f"Plot {state['plot_id']} completed.", scene_id=state['scene_id'], plot_id=state['plot_id'])
+            self.db.save_summary(
+                'plot',
+                self._build_plot_summary(state),
+                scene_id=state['scene_id'],
+                plot_id=state['plot_id'],
+            )
             state['plot_progress'] = 1.0
         return state
 
     def check_scene_completion(self, state: NarrativeState) -> NarrativeState:
-        done, progress = evaluate_scene_completion(self.db, state['scene_id'])
+        done, progress = evaluate_scene_completion(
+            self.db,
+            state['scene_id'],
+            conversation_history=state.get('conversation_history', []),
+        )
         state['scene_completed'] = done
         state['scene_progress'] = progress
         if done:
-            self.db.update_scene(state['scene_id'], {'status': 'completed', 'scene_summary': f"Scene {state['scene_id']} completed."})
-            self.db.save_summary('scene', f"Scene {state['scene_id']} completed.", scene_id=state['scene_id'])
+            scene_summary = self._build_scene_summary(state['scene_id'])
+            self.db.update_scene(state['scene_id'], {'status': 'completed', 'scene_summary': scene_summary})
+            self.db.save_summary('scene', scene_summary, scene_id=state['scene_id'])
         else:
             self.db.update_scene(state['scene_id'], {'status': 'in_progress'})
         return state
@@ -360,11 +394,134 @@ class NarrativeAgent:
             )
         return state
 
-    def _maybe_roll_dice(self, user_input: str) -> str | None:
-        m = re.search(r'(\d*)d(\d+)', user_input.lower())
+    def _roll_dice_expr(self, dice_expr: str) -> str | None:
+        m = re.fullmatch(r'\s*(\d*)d(\d+)\s*', (dice_expr or '').lower())
         if not m:
             return None
         count = int(m.group(1) or '1')
         sides = int(m.group(2))
-        rolls = [random.randint(1, sides) for _ in range(max(1, min(count, 10)))]
-        return f"{count}d{sides}: {rolls} (sum={sum(rolls)})"
+        count = max(1, min(count, 20))
+        sides = max(2, min(sides, 1000))
+        rolls = [random.randint(1, sides) for _ in range(count)]
+        return f"{rolls} (sum={sum(rolls)})"
+
+    def _extract_dice_tool_call(self, llm_output: str) -> dict[str, str] | None:
+        if 'TOOL_CALL' not in llm_output:
+            return None
+        pattern = r'TOOL_CALL:\s*roll_dice\s*(\{.*?\})'
+        m = re.search(pattern, llm_output, flags=re.DOTALL)
+        if not m:
+            return None
+        try:
+            payload = json.loads(m.group(1))
+        except Exception:
+            return None
+        dice_type = str(payload.get('dice_type', '')).strip()
+        reason = str(payload.get('reason', 'skill check')).strip()
+        if not dice_type:
+            return None
+        return {'dice_type': dice_type, 'reason': reason}
+
+    def _clean_tool_call_text(self, text: str) -> str:
+        cleaned = re.sub(r'TOOL_CALL:\s*roll_dice\s*\{.*?\}', '', text, flags=re.DOTALL)
+        cleaned = cleaned.strip()
+        return cleaned or 'You steady your breath as fate hangs in balance. What do you do next?'
+
+    def _fallback_response(self, state: NarrativeState) -> str:
+        user_input = state['latest_user_input']
+        dice_hint = re.search(r'(\d*d\d+)', user_input.lower())
+        if dice_hint:
+            rolled = self._roll_dice_expr(dice_hint.group(1))
+            if rolled:
+                state['dice_result'] = f"{dice_hint.group(1)}: {rolled}"
+        base = f"You act: {user_input}. "
+        if state.get('plot_goal'):
+            base += f"The story advances toward: {state['plot_goal']}. "
+        if state.get('retrieved_docs'):
+            base += f"Relevant clue: {state['retrieved_docs'][0]['content']}. "
+        if state.get('dice_result'):
+            base += f"Dice result applied ({state['dice_result']}). "
+        base += 'What do you do next?'
+        return base
+
+    def _generate_scene_opening(self, scene_id: str, plot_id: str) -> str:
+        scene = self.db.get_scene(scene_id) or {}
+        plot = self.db.get_plot(plot_id) or {}
+        prompt = f"""
+You are a TRPG Keeper.
+Write the opening narration to start a new scene/plot.
+Keep it immersive and concise (4-7 lines), and end with a direct hook question.
+
+Scene ID: {scene_id}
+Scene Goal: {scene.get('scene_goal', '')}
+Plot Goal: {plot.get('plot_goal', '')}
+Mandatory Events: {plot.get('mandatory_events', [])}
+Player Profile: {self.db.get_player_profile()}
+"""
+        try:
+            result = call_nvidia_llm(prompt).strip()
+            if result:
+                return result
+        except Exception:
+            pass
+        return (
+            f"Night settles over {scene_id}. You sense the next thread of fate pulling you forward.\n"
+            f"Your immediate objective: {plot.get('plot_goal', 'advance the story')}.\n"
+            "Where do you begin?"
+        )
+
+    def _build_plot_summary(self, state: NarrativeState) -> str:
+        tail = state.get('conversation_history', [])[-8:]
+        history_text = '\n'.join([f"User: {t.get('user', '')}\nAgent: {t.get('agent', '')}" for t in tail])
+        prompt = f"""
+Summarize the completed plot in 3 bullet points.
+Focus on:
+1) what happened
+2) key clues
+3) character changes
+
+Scene: {state.get('scene_id', '')}
+Plot: {state.get('plot_id', '')}
+Plot Goal: {state.get('plot_goal', '')}
+Latest Turn User: {state.get('latest_user_input', '')}
+Latest Turn Agent: {state.get('response', '')}
+Recent History:
+{history_text}
+"""
+        try:
+            summary = call_nvidia_llm(prompt).strip()
+            if summary:
+                return summary
+        except Exception:
+            pass
+        return f"Plot {state.get('plot_id', '')} completed. Key progress was made toward {state.get('plot_goal', 'the plot goal')}."
+
+    def _build_scene_summary(self, scene_id: str) -> str:
+        scene = self.db.get_scene(scene_id) or {}
+        plots = scene.get('plots', [])
+        plot_lines = '\n'.join(
+            [
+                f"- {p.get('plot_id')}: goal={p.get('plot_goal', '')}, progress={p.get('progress', 0)}, status={p.get('status', '')}"
+                for p in plots
+            ]
+        )
+        prompt = f"""
+Summarize a completed scene in 4 bullet points.
+Include:
+- core conflict
+- emotional shift
+- gained information
+- narrative turning point
+
+Scene: {scene_id}
+Scene Goal: {scene.get('scene_goal', '')}
+Plots:
+{plot_lines}
+"""
+        try:
+            summary = call_nvidia_llm(prompt).strip()
+            if summary:
+                return summary
+        except Exception:
+            pass
+        return f"Scene {scene_id} completed with major progress toward: {scene.get('scene_goal', '')}"

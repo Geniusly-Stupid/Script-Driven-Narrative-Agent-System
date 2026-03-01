@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import os
 import streamlit as st
 
 from app.agent_graph import NarrativeAgent
@@ -19,6 +18,7 @@ def run_app() -> None:
         st.session_state.agent = NarrativeAgent(st.session_state.db, st.session_state.vector)
         st.session_state.messages = []
         st.session_state.last_retrieved = []
+        st.session_state.shown_openings = set()
 
     db: Database = st.session_state.db
     vector: ChromaStore = st.session_state.vector
@@ -120,8 +120,15 @@ def run_app() -> None:
 
         else:
             st.markdown('### 4) Narrative Session')
+            opening_key = f"{state['current_scene_id']}::{state['current_plot_id']}"
+            opening_text = agent.ensure_kp_opening(state['current_scene_id'], state['current_plot_id'])
+            if opening_text and opening_key not in st.session_state.shown_openings:
+                st.session_state.messages.append({'user': '', 'agent': opening_text, 'dice': None})
+                st.session_state.shown_openings.add(opening_key)
+
             for turn in st.session_state.messages:
-                st.chat_message('user').write(turn['user'])
+                if turn['user']:
+                    st.chat_message('user').write(turn['user'])
                 st.chat_message('assistant').write(turn['agent'])
                 if turn.get('dice'):
                     st.caption(f"Dice: {turn['dice']}")

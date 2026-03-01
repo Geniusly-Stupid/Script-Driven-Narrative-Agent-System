@@ -60,7 +60,10 @@ Recent Conversation:
 
     # ===== 3. 调用 LLM =====
 
-    response = call_nvidia_llm(prompt)
+    try:
+        response = call_nvidia_llm(prompt)
+    except Exception:
+        response = ""
     # print("response: \n", response)
 
     # ===== 4. 解析 JSON =====
