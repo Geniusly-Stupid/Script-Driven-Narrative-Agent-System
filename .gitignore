@@ -26,3 +26,11 @@ api_key.txt
 # OS files
 .DS_Store
 Thumbs.db
+
+# Test/runtime generated artifacts
+test/.chroma_agent/
+test/.chroma_test/
+test/.chroma*/
+.pytest_cache/
+.coverage
+htmlcov/

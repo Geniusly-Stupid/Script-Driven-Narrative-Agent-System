@@ -1,5 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
 import json
+
 from app.llm_client import call_nvidia_llm
 
 
@@ -9,16 +11,8 @@ def generate_retrieval_queries(
     mandatory_events: list[str],
     conversation_history: list[dict],
 ) -> list[str]:
-
-    # ===== 1. 构建输入信息 =====
-
-    history_tail = "\n".join(
-        turn.get("user", "") for turn in conversation_history[-4:]
-    )
-
+    history_tail = "\n".join(turn.get("user", "") for turn in conversation_history[-4:])
     events_text = "\n".join(mandatory_events[:5])
-
-    # ===== 2. Prompt 模板 =====
 
     prompt = f"""
 You are a narrative retrieval planner.
@@ -58,15 +52,10 @@ Recent Conversation:
 {history_tail}
 """
 
-    # ===== 3. 调用 LLM =====
-
     try:
         response = call_nvidia_llm(prompt)
     except Exception:
         response = ""
-    # print("response: \n", response)
-
-    # ===== 4. 解析 JSON =====
 
     try:
         data = json.loads(response)
@@ -75,9 +64,6 @@ Recent Conversation:
             return [q for q in queries if isinstance(q, str) and q.strip()]
     except Exception:
         pass
-
-    # ===== 5. fallback（极重要） =====
-    # 防止模型输出不规范导致系统崩溃
 
     fallback_queries = [user_input, plot_goal]
     return [q for q in fallback_queries if q]
@@ -90,9 +76,12 @@ def categorize_docs(docs: list[dict]) -> dict[str, str]:
         'location': [],
         'rule': [],
         'item_or_clue': [],
+        'world_context': [],
+        'truth': [],
     }
     for d in docs:
-        t = d.get('metadata', {}).get('type', 'event')
+        meta = d.get('metadata', {}) or {}
+        t = meta.get('type', 'event')
         content = d.get('content', '')
         if t == 'npc':
             buckets['npc'].append(content)
@@ -100,8 +89,14 @@ def categorize_docs(docs: list[dict]) -> dict[str, str]:
             buckets['location'].append(content)
         elif t == 'rule':
             buckets['rule'].append(content)
-        elif t in ['item', 'event']:
+        elif t in {'item', 'event', 'clue'}:
             buckets['item_or_clue'].append(content)
+        elif t == 'world_context':
+            knowledge_type = str(meta.get('knowledge_type', 'other')).strip().lower()
+            if knowledge_type == 'truth':
+                buckets['truth'].append(content)
+            else:
+                buckets['world_context'].append(f"[{knowledge_type}] {content}" if knowledge_type else content)
 
     return {
         'npc_related_info': '\n'.join(buckets['npc']) or 'None',
@@ -109,4 +104,6 @@ def categorize_docs(docs: list[dict]) -> dict[str, str]:
         'location_related_info': '\n'.join(buckets['location']) or 'None',
         'game_rule_info': '\n'.join(buckets['rule']) or 'None',
         'item_or_clue_info': '\n'.join(buckets['item_or_clue']) or 'None',
+        'world_context_info': '\n'.join(buckets['world_context']) or 'None',
+        'truth_related_info': '\n'.join(buckets['truth']) or 'None',
     }

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import sqlite3
@@ -23,7 +23,10 @@ class Database:
                 scene_id TEXT PRIMARY KEY,
                 scene_goal TEXT NOT NULL,
                 status TEXT NOT NULL,
-                scene_summary TEXT NOT NULL DEFAULT ''
+                scene_summary TEXT NOT NULL DEFAULT '',
+                scene_description TEXT NOT NULL DEFAULT '',
+                source_page_start INTEGER NOT NULL DEFAULT 1,
+                source_page_end INTEGER NOT NULL DEFAULT 1
             );
 
             CREATE TABLE IF NOT EXISTS plots (
@@ -35,6 +38,8 @@ class Database:
                 locations TEXT NOT NULL,
                 status TEXT NOT NULL,
                 progress REAL NOT NULL,
+                source_page_start INTEGER NOT NULL DEFAULT 1,
+                source_page_end INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY(scene_id) REFERENCES scenes(scene_id)
             );
 
@@ -66,9 +71,21 @@ class Database:
                 player_profile TEXT NOT NULL,
                 current_scene_intro TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS knowledge_base (
+                knowledge_id TEXT PRIMARY KEY,
+                knowledge_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source_page_start INTEGER NOT NULL,
+                source_page_end INTEGER NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );
             '''
         )
         self.conn.commit()
+        self._migrate_schema()
+
         if not self.conn.execute('SELECT 1 FROM system_state WHERE id = 1').fetchone():
             self.conn.execute(
                 '''
@@ -77,6 +94,35 @@ class Database:
                 '''
             )
             self.conn.commit()
+
+    def _migrate_schema(self) -> None:
+        self._ensure_column('scenes', "scene_description TEXT NOT NULL DEFAULT ''")
+        self._ensure_column('scenes', 'source_page_start INTEGER NOT NULL DEFAULT 1')
+        self._ensure_column('scenes', 'source_page_end INTEGER NOT NULL DEFAULT 1')
+        self._ensure_column('plots', 'source_page_start INTEGER NOT NULL DEFAULT 1')
+        self._ensure_column('plots', 'source_page_end INTEGER NOT NULL DEFAULT 1')
+
+        self.conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS knowledge_base (
+                knowledge_id TEXT PRIMARY KEY,
+                knowledge_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source_page_start INTEGER NOT NULL,
+                source_page_end INTEGER NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+            '''
+        )
+        self.conn.commit()
+
+    def _ensure_column(self, table: str, column_def: str) -> None:
+        col_name = column_def.split()[0]
+        rows = self.conn.execute(f'PRAGMA table_info({table})').fetchall()
+        existing_cols = {r['name'] for r in rows}
+        if col_name not in existing_cols:
+            self.conn.execute(f'ALTER TABLE {table} ADD COLUMN {column_def}')
 
     def close(self) -> None:
         self.conn.close()
@@ -87,20 +133,49 @@ class Database:
         cur.execute('DELETE FROM plots')
         cur.execute('DELETE FROM memory')
         cur.execute('DELETE FROM summaries')
+        cur.execute('DELETE FROM knowledge_base')
         self.conn.commit()
 
     def insert_scenes(self, scenes: list[dict[str, Any]]) -> None:
         cur = self.conn.cursor()
         for scene in scenes:
             cur.execute(
-                'INSERT OR REPLACE INTO scenes(scene_id, scene_goal, status, scene_summary) VALUES (?, ?, ?, ?)',
-                (scene['scene_id'], scene['scene_goal'], scene.get('status', 'pending'), scene.get('scene_summary', '')),
+                '''
+                INSERT OR REPLACE INTO scenes(
+                    scene_id,
+                    scene_goal,
+                    status,
+                    scene_summary,
+                    scene_description,
+                    source_page_start,
+                    source_page_end
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    scene['scene_id'],
+                    scene['scene_goal'],
+                    scene.get('status', 'pending'),
+                    scene.get('scene_summary', ''),
+                    scene.get('scene_description', ''),
+                    int(scene.get('source_page_start', 1)),
+                    int(scene.get('source_page_end', scene.get('source_page_start', 1))),
+                ),
             )
             for plot in scene.get('plots', []):
                 cur.execute(
                     '''
-                    INSERT OR REPLACE INTO plots(plot_id, scene_id, plot_goal, mandatory_events, npc, locations, status, progress)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR REPLACE INTO plots(
+                        plot_id,
+                        scene_id,
+                        plot_goal,
+                        mandatory_events,
+                        npc,
+                        locations,
+                        status,
+                        progress,
+                        source_page_start,
+                        source_page_end
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''',
                     (
                         plot['plot_id'],
@@ -111,9 +186,64 @@ class Database:
                         json.dumps(plot.get('locations', []), ensure_ascii=False),
                         plot.get('status', 'pending'),
                         float(plot.get('progress', 0.0)),
+                        int(plot.get('source_page_start', scene.get('source_page_start', 1))),
+                        int(plot.get('source_page_end', plot.get('source_page_start', scene.get('source_page_end', 1)))),
                     ),
                 )
         self.conn.commit()
+
+    def insert_knowledge(self, knowledge_items: list[dict[str, Any]]) -> None:
+        cur = self.conn.cursor()
+        for item in knowledge_items:
+            metadata = item.get('metadata', {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            cur.execute(
+                '''
+                INSERT OR REPLACE INTO knowledge_base(
+                    knowledge_id,
+                    knowledge_type,
+                    title,
+                    content,
+                    source_page_start,
+                    source_page_end,
+                    metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    item['knowledge_id'],
+                    item.get('knowledge_type', 'other'),
+                    item.get('title', ''),
+                    item.get('content', ''),
+                    int(item.get('source_page_start', 1)),
+                    int(item.get('source_page_end', item.get('source_page_start', 1))),
+                    json.dumps(metadata, ensure_ascii=False),
+                ),
+            )
+        self.conn.commit()
+
+    def list_knowledge(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            'SELECT * FROM knowledge_base ORDER BY source_page_start, source_page_end, knowledge_id'
+        ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item['metadata'] = json.loads(item.get('metadata', '{}') or '{}')
+            out.append(item)
+        return out
+
+    def get_knowledge_by_type(self, knowledge_type: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            'SELECT * FROM knowledge_base WHERE knowledge_type = ? ORDER BY source_page_start, source_page_end, knowledge_id',
+            (knowledge_type,),
+        ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item['metadata'] = json.loads(item.get('metadata', '{}') or '{}')
+            out.append(item)
+        return out
 
     def list_scenes(self) -> list[dict[str, Any]]:
         scenes = []
