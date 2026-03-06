@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,14 +24,15 @@ def main() -> int:
         scenes = [
             {
                 'scene_id': 'scene_a',
-                'scene_goal': '找到遗迹入口',
+                'scene_goal': 'Find the ruin entrance',
+                'scene_description': 'The team reaches the forest edge under low visibility. A guide urges quick action while concealing political tension around the ruins. Players can examine old markings, interrogate locals, or scout dangerous routes before rival groups arrive.',
                 'status': 'in_progress',
-                'scene_summary': '队伍抵达森林边缘',
+                'scene_summary': 'The party reached the forest edge.',
                 'plots': [
                     {
                         'plot_id': 'scene_a_plot_1',
-                        'plot_goal': '调查石碑并获取线索',
-                        'mandatory_events': ['调查石碑', '记录符文'],
+                        'plot_goal': 'Inspect the stone tablet and obtain clues',
+                        'mandatory_events': ['Inspect tablet', 'Record runes'],
                         'npc': ['Guide'],
                         'locations': ['Forest Ruin'],
                         'status': 'in_progress',
@@ -40,8 +41,27 @@ def main() -> int:
                 ],
             }
         ]
+        knowledge = [
+            {
+                'knowledge_id': 'knowledge_1',
+                'knowledge_type': 'background',
+                'title': 'Faction Pressure',
+                'content': 'Two factions compete for control of ruin artifacts.',
+                'source_page_start': 1,
+                'source_page_end': 1,
+            },
+            {
+                'knowledge_id': 'knowledge_2',
+                'knowledge_type': 'truth',
+                'title': 'Hidden Pact',
+                'content': 'The guide secretly works for a faction leader.',
+                'source_page_start': 2,
+                'source_page_end': 2,
+            },
+        ]
         db.insert_scenes(scenes)
-        store.add_from_scenes(scenes)
+        db.insert_knowledge(knowledge)
+        store.add_from_scenes(scenes, knowledge=knowledge)
         db.update_system_state(
             {
                 'stage': 'session',
@@ -54,24 +74,29 @@ def main() -> int:
         )
 
         agent = NarrativeAgent(db, store)
-        user_input = '我调查石碑并进行1d20检定'
-        print('[test_agent_graph] 输入: user_input ->', user_input)
+        user_input = 'I inspect the stone tablet and roll 1d20'
+        print('[test_agent_graph] input: user_input ->', user_input)
         result = agent.run_turn(user_input)
 
-        print('[test_agent_graph] 输出: prompt(前500字符) ->')
-        print((result.get('prompt') or '')[:500])
-        print('[test_agent_graph] 输出: retrieved_docs ->', result.get('retrieved_docs'))
-        print('[test_agent_graph] 输出: response ->', result.get('response'))
-        print('[test_agent_graph] 输出: dice_result ->', result.get('dice_result'))
+        prompt = result.get('prompt') or ''
+        print('[test_agent_graph] output: prompt(first 500 chars) ->')
+        print(prompt[:500])
+        print('[test_agent_graph] output: retrieved_docs ->', result.get('retrieved_docs'))
+        print('[test_agent_graph] output: response ->', result.get('response'))
+        print('[test_agent_graph] output: dice_result ->', result.get('dice_result'))
+
+        assert 'Scene Description:' in prompt, 'prompt must include scene_description section'
+        assert 'World Context:' in prompt, 'prompt must include world_context section'
+        assert 'Hidden Truth (Keeper-only):' in prompt, 'prompt must include truth context section'
 
         new_state = db.get_system_state()
-        print('[test_agent_graph] 输出: system_state ->', new_state)
+        print('[test_agent_graph] output: system_state ->', new_state)
 
         db.close()
-        print('[test_agent_graph] 结果: PASS')
+        print('[test_agent_graph] result: PASS')
         return 0
     except Exception as exc:  # noqa: BLE001
-        print(f'[test_agent_graph] 结果: FAIL -> {exc}')
+        print(f'[test_agent_graph] result: FAIL -> {exc}')
         return 1
 
 

@@ -1,15 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
-import math
+import json
 import os
 import shutil
 from typing import Iterable, List
 
 import chromadb
 from chromadb.config import Settings
-import re
-
 from sentence_transformers import SentenceTransformer
 
 
@@ -21,34 +19,11 @@ class ModelEmbedding:
             ModelEmbedding._model = SentenceTransformer("intfloat/multilingual-e5-base")
         self.model = ModelEmbedding._model
 
-    # ----------------------------
-    # Preprocess for E5 format
-    # ----------------------------
-    def _prepare_text(self, text: str) -> str:
-        lang = self._detect_language(text)
-
-        # E5 family models expect special prefix
-        # query: for search query
-        # passage: for documents
-
-        # Here we default to passage format
-        # embed_query() will override to query
-        return text.strip()
-
-    # ----------------------------
-    # Core embedding
-    # ----------------------------
     def _embed(self, texts: List[str], prefix: str) -> List[List[float]]:
         processed = [f"{prefix}: {t.strip()}" for t in texts]
-        embeddings = self.model.encode(
-            processed,
-            normalize_embeddings=True
-        )
+        embeddings = self.model.encode(processed, normalize_embeddings=True)
         return embeddings.tolist()
 
-    # ----------------------------
-    # Chroma compatible API
-    # ----------------------------
     def __call__(self, input: Iterable[str]) -> List[List[float]]:
         return self.embed_documents(list(input))
 
@@ -88,13 +63,11 @@ class ChromaStore:
         try:
             return chromadb.PersistentClient(path=path)
         except BaseException:
-            # If the persistent store is corrupted, recreate it.
             if os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
             try:
                 return chromadb.PersistentClient(path=path)
             except BaseException:
-                # Fallback to explicit Settings-based client creation.
                 settings = Settings(is_persistent=True, persist_directory=path, allow_reset=True)
                 client = chromadb.Client(settings=settings)
                 try:
@@ -103,37 +76,100 @@ class ChromaStore:
                     pass
                 return client
 
-    def add_from_scenes(self, scenes: list[dict]) -> None:
+    def add_from_scenes(self, scenes: list[dict], knowledge: list[dict] | None = None) -> None:
         docs: list[dict] = []
+
         for scene in scenes:
+            scene_id = scene.get('scene_id', '')
             for plot in scene.get('plots', []):
+                plot_id = plot.get('plot_id', '')
                 for npc in plot.get('npc', []):
-                    docs.append({'type': 'npc', 'name': npc, 'description': f'NPC {npc} in {scene["scene_id"]}/{plot["plot_id"]}', 'metadata': {'scene_id': scene['scene_id'], 'plot_id': plot['plot_id']}})
+                    docs.append(
+                        {
+                            'type': 'npc',
+                            'name': npc,
+                            'description': f"NPC {npc} in {scene_id}/{plot_id}",
+                            'metadata': {'scene_id': scene_id, 'plot_id': plot_id},
+                        }
+                    )
                 for location in plot.get('locations', []):
-                    docs.append({'type': 'location', 'name': location, 'description': f'Location {location} in {scene["scene_id"]}/{plot["plot_id"]}', 'metadata': {'scene_id': scene['scene_id'], 'plot_id': plot['plot_id']}})
+                    docs.append(
+                        {
+                            'type': 'location',
+                            'name': location,
+                            'description': f"Location {location} in {scene_id}/{plot_id}",
+                            'metadata': {'scene_id': scene_id, 'plot_id': plot_id},
+                        }
+                    )
                 for event in plot.get('mandatory_events', []):
-                    docs.append({'type': 'event', 'name': event[:80], 'description': event, 'metadata': {'scene_id': scene['scene_id'], 'plot_id': plot['plot_id']}})
+                    docs.append(
+                        {
+                            'type': 'event',
+                            'name': event[:80],
+                            'description': event,
+                            'metadata': {'scene_id': scene_id, 'plot_id': plot_id},
+                        }
+                    )
+
+        for item in knowledge or []:
+            knowledge_type = str(item.get('knowledge_type', 'other')).strip().lower() or 'other'
+            mapped_type = self._map_knowledge_type_to_doc_type(knowledge_type)
+            title = str(item.get('title', '')).strip() or str(item.get('knowledge_id', 'knowledge')).strip()
+            content = str(item.get('content', '')).strip() or title
+            if content.startswith(title):
+                description = content
+            else:
+                description = f"{title}\n{content}"
+
+            docs.append(
+                {
+                    'type': mapped_type,
+                    'name': title[:80],
+                    'description': description,
+                    'metadata': {
+                        'knowledge_id': item.get('knowledge_id', ''),
+                        'knowledge_type': knowledge_type,
+                        'source_page_start': int(item.get('source_page_start', 1)),
+                        'source_page_end': int(item.get('source_page_end', item.get('source_page_start', 1))),
+                    },
+                }
+            )
+
         if not docs:
             return
-        ids = [f"{d['type']}::{d['name']}::{i}" for i, d in enumerate(docs)]
-        embeddings = self.embedding_fn.embed_documents(
-            [d['description'] for d in docs]
-        )
+
+        ids = [self._make_doc_id(d, i) for i, d in enumerate(docs)]
+        embeddings = self.embedding_fn.embed_documents([d['description'] for d in docs])
         self.collection.add(
             ids=ids,
             documents=[d['description'] for d in docs],
             metadatas=[d['metadata'] | {'type': d['type'], 'name': d['name']} for d in docs],
-            embeddings=embeddings
+            embeddings=embeddings,
         )
+
+    def _make_doc_id(self, doc: dict, idx: int) -> str:
+        seed = json.dumps(
+            {
+                'type': doc.get('type', ''),
+                'name': doc.get('name', ''),
+                'description': doc.get('description', ''),
+                'metadata': doc.get('metadata', {}),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        digest = hashlib.sha1(seed.encode('utf-8')).hexdigest()[:16]
+        return f"{doc.get('type', 'doc')}::{digest}::{idx}"
+
+    def _map_knowledge_type_to_doc_type(self, knowledge_type: str) -> str:
+        if knowledge_type in {'npc', 'location', 'rule', 'item', 'clue'}:
+            return knowledge_type
+        return 'world_context'
 
     def search(self, query: str, k: int = 5) -> list[dict]:
         query_embedding = self.embedding_fn.embed_query(query)
+        result = self.collection.query(query_embeddings=[query_embedding], n_results=k)
 
-        result = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=k
-        )
-        
         out = []
         for doc, meta, dist in zip(
             result.get('documents', [[]])[0],

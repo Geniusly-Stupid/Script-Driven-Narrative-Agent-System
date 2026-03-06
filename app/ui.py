@@ -1,10 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+import json
 
 import streamlit as st
 
 from app.agent_graph import NarrativeAgent
 from app.database import Database
-from app.parser import parse_script, read_pdf_pages
+from app.parser import parse_script_bundle, read_pdf_pages
 from app.vector_store import ChromaStore
 
 
@@ -50,21 +52,55 @@ def run_app() -> None:
             uploaded = st.file_uploader('Upload PDF script', type=['pdf'])
             start_page = st.number_input('Start Page', min_value=1, value=1)
             end_page = st.number_input('End Page (0 means auto)', min_value=0, value=0)
+            story_start_page = st.number_input('Story Start Page (PDF page, 0 means auto)', min_value=0, value=0)
+            story_end_page = st.number_input('Story End Page (PDF page, 0 means auto)', min_value=0, value=0)
+            st.caption(
+                'If Story Start/End are provided, that page span is parsed as story (scene/plot), and all other pages are parsed as knowledge.'
+            )
+
             if uploaded and st.button('Parse Script'):
                 try:
+                    if (story_start_page > 0) != (story_end_page > 0):
+                        st.error('Please fill both Story Start Page and Story End Page, or leave both as 0 for auto detection.')
+                        st.stop()
+
+                    read_start_page = int(start_page)
                     pages = read_pdf_pages(
                         uploaded.getvalue(),
-                        start_page=int(start_page),
+                        start_page=read_start_page,
                         end_page=int(end_page) if end_page > 0 else None,
                     )
-                    scenes = parse_script(pages)
+
+                    manual_story_start = None
+                    manual_story_end = None
+                    if story_start_page > 0 and story_end_page > 0:
+                        manual_story_start = int(story_start_page) - read_start_page + 1
+                        manual_story_end = int(story_end_page) - read_start_page + 1
+
+                    bundle = parse_script_bundle(
+                        pages,
+                        story_start_page=manual_story_start,
+                        story_end_page=manual_story_end,
+                    )
+                    scenes = bundle.get('scenes', [])
+                    knowledge = bundle.get('knowledge', [])
+                    structure = bundle.get('structure', {})
+                    parse_warnings = bundle.get('warnings', [])
+
                     if not scenes:
                         st.error('No scenes extracted. Please check the PDF content or LLM output.')
                         st.stop()
+
                     db.reset_story_data()
                     vector.reset()
                     db.insert_scenes(scenes)
-                    vector.add_from_scenes(scenes)
+                    db.insert_knowledge(knowledge)
+                    vector.add_from_scenes(scenes, knowledge=knowledge)
+
+                    db.save_summary('parse_structure', json.dumps(structure, ensure_ascii=False))
+                    db.save_summary('parse_warnings', json.dumps(parse_warnings, ensure_ascii=False))
+                    db.save_summary('parse_mode', bundle.get('parse_mode', 'balanced'))
+
                     first_scene = scenes[0]
                     first_plot = first_scene['plots'][0]
                     db.update_scene(first_scene['scene_id'], {'status': 'in_progress'})
@@ -78,7 +114,10 @@ def run_app() -> None:
                             'current_scene_intro': '',
                         }
                     )
-                    st.success('Script parsed and stored.')
+
+                    st.success(
+                        f"Script parsed and stored. scenes={len(scenes)}, knowledge={len(knowledge)}, warnings={len(parse_warnings)}"
+                    )
                     st.rerun()
                 except Exception as exc:  # noqa: BLE001
                     st.error(f'Parse failed: {exc}')
@@ -86,8 +125,51 @@ def run_app() -> None:
 
         elif stage == 'parse':
             st.markdown('### 2) Review Scene Structure')
+
+            structure_raw = db.get_summary('parse_structure')
+            if structure_raw:
+                try:
+                    structure = json.loads(structure_raw)
+                except Exception:
+                    structure = {'raw': structure_raw}
+                st.markdown('#### Parsed Document Structure')
+                st.write(structure)
+
+            parse_mode = db.get_summary('parse_mode')
+            if parse_mode:
+                st.caption(f'Parse mode: {parse_mode}')
+
+            warnings_raw = db.get_summary('parse_warnings')
+            if warnings_raw:
+                try:
+                    parse_warnings = json.loads(warnings_raw)
+                except Exception:
+                    parse_warnings = [warnings_raw]
+                if parse_warnings:
+                    st.warning(f'Parser warnings: {len(parse_warnings)}')
+                    for w in parse_warnings[:8]:
+                        st.write(f'- {w}')
+
             for scene in db.list_scenes():
-                st.write({'scene_id': scene['scene_id'], 'scene_goal': scene['scene_goal'], 'plots': len(scene.get('plots', []))})
+                st.write(
+                    {
+                        'scene_id': scene['scene_id'],
+                        'scene_goal': scene['scene_goal'],
+                        'source_pages': f"{scene.get('source_page_start', '?')}-{scene.get('source_page_end', '?')}",
+                        'scene_description': (scene.get('scene_description', '') or '')[:120],
+                        'plots': len(scene.get('plots', [])),
+                    }
+                )
+
+            knowledge_items = db.list_knowledge()
+            if knowledge_items:
+                counts: dict[str, int] = {}
+                for item in knowledge_items:
+                    t = item.get('knowledge_type', 'other')
+                    counts[t] = counts.get(t, 0) + 1
+                st.markdown('#### Knowledge Overview')
+                st.write(counts)
+
             if st.button('Confirm Structure'):
                 db.update_system_state({'stage': 'character'})
                 st.rerun()

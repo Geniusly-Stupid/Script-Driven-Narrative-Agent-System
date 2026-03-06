@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import random
@@ -35,6 +35,7 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
 - Do not fabricate missing knowledge.
 - Avoid meta commentary.
 - Guide story subtly toward Plot goal.
+- Hidden truth is keeper-only context. Use it for consistency, do not reveal it directly unless current plot already unlocks it.
 
 ## Tool Use
 
@@ -90,6 +91,9 @@ Plot ID: {plot_id}
 Scene Goal:
 {current_scene_goal}
 
+Scene Description:
+{current_scene_description}
+
 Plot Goal:
 {current_plot_goal}
 
@@ -121,6 +125,12 @@ Location:
 
 World Rules:
 {game_rule_info}
+
+World Context:
+{world_context_info}
+
+Hidden Truth (Keeper-only):
+{truth_related_info}
 
 Items / Clues:
 {item_or_clue_info}
@@ -170,6 +180,7 @@ class NarrativeState(TypedDict, total=False):
     plot_completed: bool
     scene_completed: bool
     scene_goal: str
+    scene_description: str
     plot_goal: str
     mandatory_events: list[str]
     previous_plot_summary: str
@@ -242,6 +253,7 @@ class NarrativeAgent:
         scene = self.db.get_scene(state['scene_id'])
         if scene:
             state['scene_goal'] = scene.get('scene_goal', '')
+            state['scene_description'] = scene.get('scene_description', '')
             state['current_scene_summary'] = scene.get('scene_summary', '')
             plots = scene.get('plots', [])
             for i, plot in enumerate(plots):
@@ -288,6 +300,7 @@ class NarrativeAgent:
             scene_id=state.get('scene_id', ''),
             plot_id=state.get('plot_id', ''),
             current_scene_goal=state.get('scene_goal', '') or 'None',
+            current_scene_description=state.get('scene_description', '') or 'None',
             current_plot_goal=state.get('plot_goal', '') or 'None',
             mandatory_events=', '.join(state.get('mandatory_events', [])) or 'None',
             previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
@@ -296,8 +309,10 @@ class NarrativeAgent:
             player_related_info=str(state.get('player_profile', {})),
             location_related_info=categorized['location_related_info'],
             game_rule_info=categorized['game_rule_info'],
+            world_context_info=categorized['world_context_info'],
+            truth_related_info=categorized['truth_related_info'],
             item_or_clue_info=categorized['item_or_clue_info'],
-            narrative_constraints='Respect script state and memory continuity.',
+            narrative_constraints='Respect script state and memory continuity. Keep hidden truth as internal keeper context only.',
             plot_progress_percentage_or_state=f"{state.get('plot_progress', 0.0):.0%}",
             scene_progress_percentage_or_state=f"{state.get('scene_progress', 0.0):.0%}",
         )
@@ -454,6 +469,7 @@ Keep it immersive and concise (4-7 lines), and end with a direct hook question.
 
 Scene ID: {scene_id}
 Scene Goal: {scene.get('scene_goal', '')}
+Scene Description: {scene.get('scene_description', '')}
 Plot Goal: {plot.get('plot_goal', '')}
 Mandatory Events: {plot.get('mandatory_events', [])}
 Player Profile: {self.db.get_player_profile()}
