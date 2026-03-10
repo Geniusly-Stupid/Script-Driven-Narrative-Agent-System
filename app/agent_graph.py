@@ -44,6 +44,7 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
 - After the player acts or speaks, always advance the scene with NPC dialogue, NPC action, or environmental consequences.
 - Do NOT ask rhetorical or leading questions about the PC’s beliefs, thoughts, or motivations.
 - Focus on describing NPC reactions and changes in the scene.
+- Do NOT ask questions to the player or suggest what they should do next.
 
 ## Tool Use
 
@@ -488,13 +489,35 @@ class NarrativeAgent:
         base += 'What do you do next?'
         return base
 
+    def _get_previous_scene_summary(self, scene_id: str) -> str:
+        scenes = self.db.list_scenes()
+        current_idx = next((i for i, s in enumerate(scenes) if s.get('scene_id') == scene_id), -1)
+        if current_idx <= 0:
+            return ''
+        previous_scene = scenes[current_idx - 1]
+        previous_scene_id = previous_scene.get('scene_id', '')
+        if not previous_scene_id:
+            return ''
+        return self.db.get_summary('scene', scene_id=previous_scene_id) or previous_scene.get('scene_summary', '') or ''
+
     def _generate_scene_opening(self, scene_id: str, plot_id: str) -> str:
         scene = self.db.get_scene(scene_id) or {}
         plot = self.db.get_plot(plot_id) or {}
+        previous_scene_summary = self._get_previous_scene_summary(scene_id)
         prompt = f"""
 You are a TRPG Keeper.
-Write the opening narration to start a new scene/plot.
-Keep it immersive and concise (4-7 lines), and end with a direct hook question.
+
+Write the opening narration for a new scene or plot.
+
+Guidelines:
+- Transition smoothly from the previous scene or plot into the current situation.
+- Describe the immediate environment, situation, NPC dialogue, and NPC actions in a vivid and immersive way.
+- Focus only on what is happening right now.
+- Do NOT reveal future events or the full storyline.
+- Do NOT decide the player character’s actions or thoughts.
+- Present the situation, then STOP and wait for the player to decide what to do next.
+- Do NOT ask hook questions.
+
 
 Scene ID: {scene_id}
 Scene Goal: {scene.get('scene_goal', '')}
@@ -502,6 +525,7 @@ Scene Description: {scene.get('scene_description', '')}
 Plot Goal: {plot.get('plot_goal', '')}
 Mandatory Events: {plot.get('mandatory_events', [])}
 Player Profile: {self.db.get_player_profile()}
+Previous Scene Summary: {previous_scene_summary or 'None'}
 """
         self._record_prompt(None, 'scene_opening_prompt', prompt)
         try:

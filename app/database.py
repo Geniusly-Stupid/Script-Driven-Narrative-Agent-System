@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -247,10 +248,11 @@ class Database:
 
     def list_scenes(self) -> list[dict[str, Any]]:
         scenes = []
-        for row in self.conn.execute('SELECT * FROM scenes ORDER BY scene_id').fetchall():
+        for row in self.conn.execute('SELECT * FROM scenes').fetchall():
             scene = dict(row)
             scene['plots'] = self._plots_for_scene(scene['scene_id'])
             scenes.append(scene)
+        scenes.sort(key=lambda s: self._natural_id_key(str(s.get('scene_id', ''))))
         return scenes
 
     def get_scene(self, scene_id: str) -> dict[str, Any] | None:
@@ -262,7 +264,7 @@ class Database:
         return scene
 
     def _plots_for_scene(self, scene_id: str) -> list[dict[str, Any]]:
-        rows = self.conn.execute('SELECT * FROM plots WHERE scene_id = ? ORDER BY plot_id', (scene_id,)).fetchall()
+        rows = self.conn.execute('SELECT * FROM plots WHERE scene_id = ?', (scene_id,)).fetchall()
         plots = []
         for row in rows:
             p = dict(row)
@@ -270,6 +272,7 @@ class Database:
             p['npc'] = json.loads(p['npc'])
             p['locations'] = json.loads(p['locations'])
             plots.append(p)
+        plots.sort(key=lambda p: self._natural_id_key(str(p.get('plot_id', ''))))
         return plots
 
     def get_plot(self, plot_id: str) -> dict[str, Any] | None:
@@ -350,3 +353,15 @@ class Database:
 
     def save_player_profile(self, profile: dict[str, Any]) -> None:
         self.update_system_state({'player_profile': profile})
+    @staticmethod
+    def _natural_id_key(value: str) -> tuple[Any, ...]:
+        parts = re.split(r'(\d+)', (value or '').lower())
+        key: list[Any] = []
+        for p in parts:
+            if not p:
+                continue
+            if p.isdigit():
+                key.append(int(p))
+            else:
+                key.append(p)
+        return tuple(key)
