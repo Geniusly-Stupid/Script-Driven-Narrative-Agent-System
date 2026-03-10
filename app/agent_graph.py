@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import random
@@ -36,6 +36,14 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
 - Avoid meta commentary.
 - Guide story subtly toward Plot goal.
 - Hidden truth is keeper-only context. Use it for consistency, do not reveal it directly unless current plot already unlocks it.
+
+## Player Interaction Rules
+
+- The player controls the PC. Do NOT speak for the PC, extend their dialogue, or describe their internal thoughts.
+- Do NOT repeat or paraphrase the player's input.
+- After the player acts or speaks, always advance the scene with NPC dialogue, NPC action, or environmental consequences.
+- Do NOT ask rhetorical or leading questions about the PC’s beliefs, thoughts, or motivations.
+- Focus on describing NPC reactions and changes in the scene.
 
 ## Tool Use
 
@@ -185,12 +193,15 @@ class NarrativeState(TypedDict, total=False):
     mandatory_events: list[str]
     previous_plot_summary: str
     current_scene_summary: str
+    debug_prompts: list[dict[str, str]]
 
 
 class NarrativeAgent:
     def __init__(self, db: Database, vector_store: ChromaStore) -> None:
         self.db = db
         self.vector_store = vector_store
+        self.debug_mode = False
+        self.latest_debug_prompts: list[dict[str, str]] = []
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -220,6 +231,7 @@ class NarrativeAgent:
         return workflow.compile()
 
     def run_turn(self, user_input: str) -> dict[str, Any]:
+        self.latest_debug_prompts = []
         system_state = self.db.get_system_state()
         state: NarrativeState = {
             'scene_id': system_state.get('current_scene_id', ''),
@@ -232,10 +244,14 @@ class NarrativeAgent:
             'retrieved_docs': [],
             'mandatory_events': [],
             'dice_result': None,
+            'debug_prompts': [],
         }
-        return self.graph.invoke(state)
+        result = self.graph.invoke(state)
+        self.latest_debug_prompts = result.get('debug_prompts', [])
+        return result
 
     def ensure_kp_opening(self, scene_id: str, plot_id: str) -> str | None:
+        self.latest_debug_prompts = []
         if not scene_id or not plot_id:
             return None
         existing = self.db.get_recent_turns(scene_id, plot_id, limit=1)
@@ -244,6 +260,17 @@ class NarrativeAgent:
         opening = self._generate_scene_opening(scene_id, plot_id)
         self.db.append_memory(scene_id, plot_id, KP_OPENING_MARKER, opening)
         return opening
+
+    def set_debug_mode(self, enabled: bool) -> None:
+        self.debug_mode = bool(enabled)
+
+    def _record_prompt(self, state: NarrativeState | None, name: str, prompt: str) -> None:
+        if not self.debug_mode:
+            return
+        entry = {'name': name, 'prompt': prompt}
+        if state is not None:
+            state.setdefault('debug_prompts', []).append(entry)
+        self.latest_debug_prompts.append(entry)
 
     def build_prompt(self, state: NarrativeState) -> NarrativeState:
         return state
@@ -316,11 +343,12 @@ class NarrativeAgent:
             plot_progress_percentage_or_state=f"{state.get('plot_progress', 0.0):.0%}",
             scene_progress_percentage_or_state=f"{state.get('scene_progress', 0.0):.0%}",
         )
+        self._record_prompt(state, 'turn_main_prompt', state['prompt'])
         return state
 
     def generate_response(self, state: NarrativeState) -> NarrativeState:
         try:
-            first_pass = call_nvidia_llm(state['prompt'])
+            first_pass = call_nvidia_llm(state['prompt'], model="qwen/qwen3.5-397b-a17b")
             tool_spec = self._extract_dice_tool_call(first_pass)
             if tool_spec:
                 dice_value = self._roll_dice_expr(tool_spec['dice_type'])
@@ -333,7 +361,8 @@ class NarrativeAgent:
                         "Now generate the final narrative response to the player only. "
                         "Do not output TOOL_CALL."
                     )
-                    state['response'] = call_nvidia_llm(follow_prompt).strip()
+                    self._record_prompt(state, 'turn_followup_tool_prompt', follow_prompt)
+                    state['response'] = call_nvidia_llm(follow_prompt, model="qwen/qwen3.5-397b-a17b").strip()
                 else:
                     state['response'] = self._clean_tool_call_text(first_pass)
             else:
@@ -379,7 +408,7 @@ class NarrativeAgent:
         state['scene_completed'] = done
         state['scene_progress'] = progress
         if done:
-            scene_summary = self._build_scene_summary(state['scene_id'])
+            scene_summary = self._build_scene_summary(state['scene_id'], state=state)
             self.db.update_scene(state['scene_id'], {'status': 'completed', 'scene_summary': scene_summary})
             self.db.save_summary('scene', scene_summary, scene_id=state['scene_id'])
         else:
@@ -474,8 +503,9 @@ Plot Goal: {plot.get('plot_goal', '')}
 Mandatory Events: {plot.get('mandatory_events', [])}
 Player Profile: {self.db.get_player_profile()}
 """
+        self._record_prompt(None, 'scene_opening_prompt', prompt)
         try:
-            result = call_nvidia_llm(prompt).strip()
+            result = call_nvidia_llm(prompt, model="qwen/qwen3.5-397b-a17b").strip()
             if result:
                 return result
         except Exception:
@@ -504,6 +534,7 @@ Latest Turn Agent: {state.get('response', '')}
 Recent History:
 {history_text}
 """
+        self._record_prompt(state, 'plot_summary_prompt', prompt)
         try:
             summary = call_nvidia_llm(prompt).strip()
             if summary:
@@ -512,7 +543,7 @@ Recent History:
             pass
         return f"Plot {state.get('plot_id', '')} completed. Key progress was made toward {state.get('plot_goal', 'the plot goal')}."
 
-    def _build_scene_summary(self, scene_id: str) -> str:
+    def _build_scene_summary(self, scene_id: str, state: NarrativeState | None = None) -> str:
         scene = self.db.get_scene(scene_id) or {}
         plots = scene.get('plots', [])
         plot_lines = '\n'.join(
@@ -534,6 +565,7 @@ Scene Goal: {scene.get('scene_goal', '')}
 Plots:
 {plot_lines}
 """
+        self._record_prompt(state, 'scene_summary_prompt', prompt)
         try:
             summary = call_nvidia_llm(prompt).strip()
             if summary:

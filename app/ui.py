@@ -25,6 +25,14 @@ def run_app() -> None:
     db: Database = st.session_state.db
     vector: ChromaStore = st.session_state.vector
     agent: NarrativeAgent = st.session_state.agent
+    if not hasattr(agent, 'set_debug_mode'):
+        st.session_state.agent = NarrativeAgent(db, vector)
+        agent = st.session_state.agent
+    debug_mode = st.sidebar.toggle('Debug Prompt View', value=False)
+    if hasattr(agent, 'set_debug_mode'):
+        agent.set_debug_mode(debug_mode)
+    else:
+        setattr(agent, 'debug_mode', bool(debug_mode))
 
     state = db.get_system_state()
     stage = state['stage']
@@ -41,7 +49,7 @@ def run_app() -> None:
         st.caption('Scene Progress')
         if state.get('current_scene_intro'):
             st.info(state['current_scene_intro'])
-        if st.session_state.last_retrieved:
+        if debug_mode and st.session_state.last_retrieved:
             st.markdown('### Retrieved Knowledge')
             for doc in st.session_state.last_retrieved[:5]:
                 st.write(f"- {doc.get('metadata', {}).get('type')}: {doc.get('content')}")
@@ -205,7 +213,14 @@ def run_app() -> None:
             opening_key = f"{state['current_scene_id']}::{state['current_plot_id']}"
             opening_text = agent.ensure_kp_opening(state['current_scene_id'], state['current_plot_id'])
             if opening_text and opening_key not in st.session_state.shown_openings:
-                st.session_state.messages.append({'user': '', 'agent': opening_text, 'dice': None})
+                st.session_state.messages.append(
+                    {
+                        'user': '',
+                        'agent': opening_text,
+                        'dice': None,
+                        'debug_prompts': list(getattr(agent, 'latest_debug_prompts', [])),
+                    }
+                )
                 st.session_state.shown_openings.add(opening_key)
 
             for turn in st.session_state.messages:
@@ -214,12 +229,22 @@ def run_app() -> None:
                 st.chat_message('assistant').write(turn['agent'])
                 if turn.get('dice'):
                     st.caption(f"Dice: {turn['dice']}")
+                if debug_mode and turn.get('debug_prompts'):
+                    with st.expander('Debug Prompts', expanded=False):
+                        for idx, item in enumerate(turn.get('debug_prompts', []), start=1):
+                            st.caption(f"{idx}. {item.get('name', 'prompt')}")
+                            st.code(item.get('prompt', ''), language='text')
 
             user_msg = st.chat_input('Describe your action...')
             if user_msg:
                 result = agent.run_turn(user_msg)
                 st.session_state.last_retrieved = result.get('retrieved_docs', [])
                 st.session_state.messages.append(
-                    {'user': user_msg, 'agent': result.get('response', ''), 'dice': result.get('dice_result')}
+                    {
+                        'user': user_msg,
+                        'agent': result.get('response', ''),
+                        'dice': result.get('dice_result'),
+                        'debug_prompts': result.get('debug_prompts', []),
+                    }
                 )
                 st.rerun()

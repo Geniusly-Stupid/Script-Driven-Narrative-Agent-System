@@ -20,10 +20,10 @@ def _load_api_key() -> str:
     return api_key
 
 
-def call_nvidia_llm(prompt: str) -> str:
+def call_nvidia_llm(prompt: str, model=DEFAULT_MODEL) -> str:
     api_key = _load_api_key()
 
-    model = os.getenv("NVIDIA_MODEL", DEFAULT_MODEL)
+    model = os.getenv("NVIDIA_MODEL", model)
     max_tokens = int(os.getenv("NVIDIA_MAX_TOKENS", "4096"))
     temperature = float(os.getenv("NVIDIA_TEMPERATURE", "0.6"))
     top_p = float(os.getenv("NVIDIA_TOP_P", "0.95"))
@@ -58,3 +58,13 @@ def call_nvidia_llm(prompt: str) -> str:
         raise ValueError(f"LLM request failed ({response.status_code}): {response.text}")
     data = response.json()
     return data["choices"][0]["message"]["content"]
+
+
+if __name__ == "__main__":
+    prompt = "What is the capital of France?"
+    response = call_nvidia_llm(prompt)
+    print(response)
+    print("--------------------------------")
+    response = call_nvidia_llm(prompt, model="qwen/qwen3.5-397b-a17b")
+    print(response)
+    
