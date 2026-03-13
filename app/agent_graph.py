@@ -1,9 +1,11 @@
 ﻿from __future__ import annotations
 
-import json
+import json5
 import random
 import re
 from typing import Any, TypedDict
+import traceback
+import logging
 
 from langgraph.graph import END, StateGraph
 
@@ -13,13 +15,15 @@ from app.rag import categorize_docs, generate_retrieval_queries
 from app.state import evaluate_plot_completion, evaluate_scene_completion, next_story_position
 from app.vector_store import ChromaStore
 
+logger = logging.getLogger(__name__)
+
 PROMPT_TEMPLATE = """# SYSTEM PROMPT
 
 You are {agent_role}, running an interactive {game_system} narrative experience.
 
 ## Core Responsibilities
 - Maintain long-term narrative coherence.
-- Progress toward current Scene and Plot goals.
+- Progress toward current Plot goals and ultimately the Scene goal.
 - Respect world logic and past events.
 - Do not reveal future plot content prematurely.
 - Balance player freedom with script structure.
@@ -34,28 +38,71 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
 - Use only information provided in Context.
 - Do not fabricate missing knowledge.
 - Avoid meta commentary.
-- Guide story subtly toward Plot goal.
 - Hidden truth is keeper-only context. Use it for consistency, do not reveal it directly unless current plot already unlocks it.
 
 ## Player Interaction Rules
 
 - The player controls the PC. Do NOT speak for the PC, extend their dialogue, or describe their internal thoughts.
-- Do NOT repeat or paraphrase the player's input.
 - After the player acts or speaks, always advance the scene with NPC dialogue, NPC action, or environmental consequences.
-- Do NOT ask rhetorical or leading questions about the PC’s beliefs, thoughts, or motivations.
+- If the player's action significantly deviates from the main storyline, guide them back naturally through NPC dialogue, NPC actions, or environmental consequences.
 - Focus on describing NPC reactions and changes in the scene.
+- Reveal information gradually. Do not provide too much information at once; encourage player exploration and role-play.
+- Do NOT ask rhetorical or leading questions about the PC’s beliefs, thoughts, or motivations.
 - Do NOT ask questions to the player or suggest what they should do next.
+
+## Game Mechanics
+
+Use dice rolls for actions involving uncertainty.
+
+### Skill Checks
+
+Skill checks use **1d100** and produce one of the following outcomes:
+
+- Extreme Success  
+- Hard Success  
+- Success  
+- Failure  
+- Fumble  
+
+Narrative results must scale with the outcome:
+
+- Extreme Success → major advantage or additional information  
+- Hard Success → strong success with extra benefit  
+- Success → normal success  
+- Failure → no meaningful progress  
+- Fumble → severe negative consequence  
+
+### Combat
+
+Combat actions (attack, dodge, maneuver) require a roll.
+
+Resolve the action by:
+- determining hit, miss, or critical result
+- applying damage
+- updating HP
+- describing the physical outcome
+
+Higher success levels should produce stronger effects.
+
+### Sanity
+
+When the player encounters horror or supernatural events:
+
+- perform a SAN check using a dice roll
+- adjust SAN accordingly
+- reflect psychological effects in the narrative
 
 ## Tool Use
 
-You may use tools when you need to perform actions such as dice rolling or other mechanical resolutions.
+Use tools when mechanical resolution is required.
 
 ### Dice Roll Tool
 
 Use when:
-- An action requires probabilistic resolution.
-- A skill check is needed.
-- The outcome should not be determined purely narratively.
+- resolving skill checks
+- resolving combat actions
+- resolving sanity checks
+- determining uncertain outcomes
 
 ### Call Format
 
@@ -74,11 +121,22 @@ TOOL_CALL: roll_dice
 }}
 
 ### Rules
+- Call when necessary.
+- Do not fabricate dice results.
+- Do not narrate outcomes before the tool returns.
+- After receiving the result, incorporate it naturally into the story.
 
-- Call only when necessary.
-- Do not fabricate results.
-- Do not narrate the outcome before the tool returns.
-- After receiving the result, integrate it naturally into the story.
+---
+
+# INSTRUCTION
+
+Generate the next narrative response.
+
+Requirements:
+- Move story toward Plot Goal.
+- Maintain consistency with Memory.
+- Use Retrieved Knowledge only if relevant.
+- Preserve immersion.
 
 ---
 
@@ -86,9 +144,6 @@ TOOL_CALL: roll_dice
 
 Player Input:
 {user_input}
-
-Player Intent (optional):
-{player_intent_optional}
 
 ---
 
@@ -148,26 +203,11 @@ Items / Clues:
 
 # INTERNAL STATE
 
-Narrative Constraints:
-{narrative_constraints}
-
 Plot Progress:
 {plot_progress_percentage_or_state}
 
 Scene Progress:
 {scene_progress_percentage_or_state}
-
----
-
-# INSTRUCTION
-
-Generate the next narrative response.
-
-Requirements:
-- Move story toward Plot Goal.
-- Maintain consistency with Memory.
-- Use Retrieved Knowledge only if relevant.
-- Preserve immersion.
 """
 
 KP_OPENING_MARKER = '[KP_OPENING]'
@@ -255,8 +295,7 @@ class NarrativeAgent:
         self.latest_debug_prompts = []
         if not scene_id or not plot_id:
             return None
-        existing = self.db.get_recent_turns(scene_id, plot_id, limit=1)
-        if existing:
+        if self.db.has_scene_opening(scene_id, KP_OPENING_MARKER):
             return None
         opening = self._generate_scene_opening(scene_id, plot_id)
         self.db.append_memory(scene_id, plot_id, KP_OPENING_MARKER, opening)
@@ -272,6 +311,20 @@ class NarrativeAgent:
         if state is not None:
             state.setdefault('debug_prompts', []).append(entry)
         self.latest_debug_prompts.append(entry)
+
+    def _llm_call(self, prompt: str, *, step_name: str, model: str = "qwen/qwen3.5-397b-a17b") -> str:
+        logger.info("LLM step=%s prompt_length=%s", step_name, len(prompt))
+        return call_nvidia_llm(prompt, model=model, step_name=step_name).strip()
+
+    def _build_tool_followup_prompt(self, state: NarrativeState) -> str:
+        base_prompt = state.get('prompt', '')
+        return (
+            f"{base_prompt}\n\n"
+            "# TOOL RESULT\n"
+            f"roll_dice -> {state['dice_result']}\n\n"
+            "Use the tool result above. Generate the final narrative response to the player only. "
+            "Do not output TOOL_CALL."
+        )
 
     def build_prompt(self, state: NarrativeState) -> NarrativeState:
         return state
@@ -324,7 +377,6 @@ class NarrativeAgent:
             dice_type='{dice_type}',
             reason='{reason}',
             user_input=state['latest_user_input'],
-            player_intent_optional='',
             scene_id=state.get('scene_id', ''),
             plot_id=state.get('plot_id', ''),
             current_scene_goal=state.get('scene_goal', '') or 'None',
@@ -340,7 +392,6 @@ class NarrativeAgent:
             world_context_info=categorized['world_context_info'],
             truth_related_info=categorized['truth_related_info'],
             item_or_clue_info=categorized['item_or_clue_info'],
-            narrative_constraints='Respect script state and memory continuity. Keep hidden truth as internal keeper context only.',
             plot_progress_percentage_or_state=f"{state.get('plot_progress', 0.0):.0%}",
             scene_progress_percentage_or_state=f"{state.get('scene_progress', 0.0):.0%}",
         )
@@ -349,26 +400,34 @@ class NarrativeAgent:
 
     def generate_response(self, state: NarrativeState) -> NarrativeState:
         try:
-            first_pass = call_nvidia_llm(state['prompt'], model="qwen/qwen3.5-397b-a17b")
+            first_pass = self._llm_call(state['prompt'], step_name='main_generation')
             tool_spec = self._extract_dice_tool_call(first_pass)
             if tool_spec:
+                logger.info(
+                    "Tool call detected step=tool_call_parse dice_type=%s reason=%s",
+                    tool_spec['dice_type'],
+                    tool_spec['reason'],
+                )
                 dice_value = self._roll_dice_expr(tool_spec['dice_type'])
                 if dice_value:
                     state['dice_result'] = f"{tool_spec['dice_type']}: {dice_value} (reason: {tool_spec['reason']})"
+                    logger.info("Tool execution step=roll_dice result=%s", state['dice_result'])
                     follow_prompt = (
-                        f"{state['prompt']}\n\n"
-                        "# TOOL RESULT\n"
-                        f"roll_dice -> {state['dice_result']}\n\n"
-                        "Now generate the final narrative response to the player only. "
-                        "Do not output TOOL_CALL."
+                        "Dice Result:\n"
+                        f"{state['dice_result']}\n\n"
+                        "Continue the narrative response to the player.\n"
+                        "Do not output TOOL_CALL again."
                     )
                     self._record_prompt(state, 'turn_followup_tool_prompt', follow_prompt)
-                    state['response'] = call_nvidia_llm(follow_prompt, model="qwen/qwen3.5-397b-a17b").strip()
+                    state['response'] = self._llm_call(follow_prompt, step_name='tool_followup_generation')
                 else:
                     state['response'] = self._clean_tool_call_text(first_pass)
             else:
                 state['response'] = first_pass.strip()
-        except Exception:
+        except Exception as e:
+            logger.error("LLM error in generate_response prompt_length=%s error=%s", len(state.get('prompt', '')), e)
+            print("LLM error:", e)
+            traceback.print_exc()
             state['response'] = self._fallback_response(state)
         return state
 
@@ -458,7 +517,7 @@ class NarrativeAgent:
         if not m:
             return None
         try:
-            payload = json.loads(m.group(1))
+            payload = json5.loads(m.group(1))
         except Exception:
             return None
         dice_type = str(payload.get('dice_type', '')).strip()
@@ -513,9 +572,10 @@ Guidelines:
 - Transition smoothly from the previous scene or plot into the current situation.
 - Describe the immediate environment, situation, NPC dialogue, and NPC actions in a vivid and immersive way.
 - Focus only on what is happening right now.
+- Reveal information gradually. Do not provide too much information at once; encourage player exploration and role-play.
+- Present the situation, then STOP and wait for the player to decide what to do next.
 - Do NOT reveal future events or the full storyline.
 - Do NOT decide the player character’s actions or thoughts.
-- Present the situation, then STOP and wait for the player to decide what to do next.
 - Do NOT ask hook questions.
 
 
@@ -529,7 +589,7 @@ Previous Scene Summary: {previous_scene_summary or 'None'}
 """
         self._record_prompt(None, 'scene_opening_prompt', prompt)
         try:
-            result = call_nvidia_llm(prompt, model="qwen/qwen3.5-397b-a17b").strip()
+            result = self._llm_call(prompt, step_name='scene_opening_generation')
             if result:
                 return result
         except Exception:
@@ -560,7 +620,7 @@ Recent History:
 """
         self._record_prompt(state, 'plot_summary_prompt', prompt)
         try:
-            summary = call_nvidia_llm(prompt).strip()
+            summary = call_nvidia_llm(prompt, step_name='plot_summary_generation').strip()
             if summary:
                 return summary
         except Exception:
@@ -591,7 +651,7 @@ Plots:
 """
         self._record_prompt(state, 'scene_summary_prompt', prompt)
         try:
-            summary = call_nvidia_llm(prompt).strip()
+            summary = call_nvidia_llm(prompt, step_name='scene_summary_generation').strip()
             if summary:
                 return summary
         except Exception:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import time
 from pathlib import Path
 
 import requests
@@ -8,6 +10,7 @@ import requests
 
 INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 DEFAULT_MODEL = "qwen/qwen2.5-7b-instruct"
+logger = logging.getLogger(__name__)
 
 
 def _load_api_key() -> str:
@@ -20,7 +23,14 @@ def _load_api_key() -> str:
     return api_key
 
 
-def call_nvidia_llm(prompt: str, model=DEFAULT_MODEL) -> str:
+def call_nvidia_llm(
+    prompt: str,
+    model=DEFAULT_MODEL,
+    *,
+    step_name: str = "generation",
+    max_retries: int = 3,
+    timeout: int | float = 120,
+) -> str:
     api_key = _load_api_key()
 
     model = os.getenv("NVIDIA_MODEL", model)
@@ -53,11 +63,85 @@ def call_nvidia_llm(prompt: str, model=DEFAULT_MODEL) -> str:
         },
     }
 
-    response = requests.post(INVOKE_URL, headers=headers, json=payload, timeout=120)
-    if not response.ok:
-        raise ValueError(f"LLM request failed ({response.status_code}): {response.text}")
-    data = response.json()
-    return data["choices"][0]["message"]["content"]
+    prompt_length = len(prompt)
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(
+                "LLM request start step=%s attempt=%s/%s prompt_length=%s model=%s",
+                step_name,
+                attempt,
+                max_retries,
+                prompt_length,
+                model,
+            )
+            response = requests.post(INVOKE_URL, headers=headers, json=payload, timeout=timeout)
+            if not response.ok:
+                if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
+                    raise requests.exceptions.RequestException(
+                        f"retryable status={response.status_code} body={response.text}"
+                    )
+                raise ValueError(f"LLM request failed ({response.status_code}): {response.text}")
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
+            last_error = exc
+            logger.warning(
+                "LLM request retryable error step=%s attempt=%s/%s prompt_length=%s error=%s",
+                step_name,
+                attempt,
+                max_retries,
+                prompt_length,
+                exc,
+            )
+        except requests.exceptions.Timeout as exc:
+            last_error = exc
+            logger.warning(
+                "LLM request timeout step=%s attempt=%s/%s prompt_length=%s error=%s",
+                step_name,
+                attempt,
+                max_retries,
+                prompt_length,
+                exc,
+            )
+        except requests.exceptions.RequestException as exc:
+            last_error = exc
+            logger.warning(
+                "LLM request network error step=%s attempt=%s/%s prompt_length=%s error=%s",
+                step_name,
+                attempt,
+                max_retries,
+                prompt_length,
+                exc,
+            )
+        except Exception as exc:
+            logger.error(
+                "LLM request failed without retry step=%s prompt_length=%s error=%s",
+                step_name,
+                prompt_length,
+                exc,
+            )
+            raise
+
+        if attempt < max_retries:
+            backoff_seconds = min(8.0, 1.5 * (2 ** (attempt - 1)))
+            logger.info(
+                "LLM request backoff step=%s next_attempt=%s sleep_seconds=%.1f",
+                step_name,
+                attempt + 1,
+                backoff_seconds,
+            )
+            time.sleep(backoff_seconds)
+
+    assert last_error is not None
+    logger.error(
+        "LLM request exhausted retries step=%s prompt_length=%s error=%s",
+        step_name,
+        prompt_length,
+        last_error,
+    )
+    raise last_error
 
 
 if __name__ == "__main__":

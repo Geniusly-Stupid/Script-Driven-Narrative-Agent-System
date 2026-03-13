@@ -514,7 +514,7 @@ def run_app() -> None:
 
         else:
             st.markdown('### 4) Narrative Session')
-            opening_key = f"{state['current_scene_id']}::{state['current_plot_id']}"
+            opening_key = state['current_scene_id']
             opening_text = agent.ensure_kp_opening(state['current_scene_id'], state['current_plot_id'])
             if opening_text and opening_key not in st.session_state.shown_openings:
                 st.session_state.messages.append(

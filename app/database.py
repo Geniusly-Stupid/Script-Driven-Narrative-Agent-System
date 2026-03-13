@@ -311,6 +311,13 @@ class Database:
         ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    def has_scene_opening(self, scene_id: str, marker: str) -> bool:
+        row = self.conn.execute(
+            'SELECT 1 FROM memory WHERE scene_id = ? AND user = ? LIMIT 1',
+            (scene_id, marker),
+        ).fetchone()
+        return row is not None
+
     def save_summary(self, summary_type: str, content: str, scene_id: str = '', plot_id: str = '') -> None:
         self.conn.execute(
             '''
