@@ -70,7 +70,8 @@ class Database:
                 plot_progress REAL NOT NULL,
                 scene_progress REAL NOT NULL,
                 player_profile TEXT NOT NULL,
-                current_scene_intro TEXT NOT NULL
+                current_scene_intro TEXT NOT NULL,
+                output_language TEXT NOT NULL DEFAULT 'English'
             );
 
             CREATE TABLE IF NOT EXISTS knowledge_base (
@@ -90,8 +91,8 @@ class Database:
         if not self.conn.execute('SELECT 1 FROM system_state WHERE id = 1').fetchone():
             self.conn.execute(
                 '''
-                INSERT INTO system_state (id, stage, current_scene_id, current_plot_id, plot_progress, scene_progress, player_profile, current_scene_intro)
-                VALUES (1, 'upload', '', '', 0.0, 0.0, '{}', '')
+                INSERT INTO system_state (id, stage, current_scene_id, current_plot_id, plot_progress, scene_progress, player_profile, current_scene_intro, output_language)
+                VALUES (1, 'upload', '', '', 0.0, 0.0, '{}', '', 'English')
                 '''
             )
             self.conn.commit()
@@ -102,6 +103,7 @@ class Database:
         self._ensure_column('scenes', 'source_page_end INTEGER NOT NULL DEFAULT 1')
         self._ensure_column('plots', 'source_page_start INTEGER NOT NULL DEFAULT 1')
         self._ensure_column('plots', 'source_page_end INTEGER NOT NULL DEFAULT 1')
+        self._ensure_column('system_state', "output_language TEXT NOT NULL DEFAULT 'English'")
 
         self.conn.execute(
             '''

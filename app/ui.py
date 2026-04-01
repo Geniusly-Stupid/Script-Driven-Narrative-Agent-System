@@ -9,6 +9,7 @@ import streamlit as st
 from app.agent_graph import NarrativeAgent
 from app.database import Database
 from app.parser import parse_script_bundle, read_pdf_pages
+from app.rules_loader import load_game_rules_knowledge
 from app.vector_store import ChromaStore
 
 
@@ -221,6 +222,27 @@ def run_app() -> None:
         setattr(agent, 'debug_mode', bool(debug_mode))
 
     state = db.get_system_state()
+    existing_rule_items = [
+        item for item in db.get_knowledge_by_type('rule') if item.get('metadata', {}).get('source') == 'database/GameRules.md'
+    ]
+    if not existing_rule_items:
+        game_rules_knowledge = load_game_rules_knowledge()
+        if game_rules_knowledge:
+            db.insert_knowledge(game_rules_knowledge)
+            vector.add_from_scenes([], knowledge=game_rules_knowledge)
+            state = db.get_system_state()
+    language_options = ['English', 'Chinese']
+    current_language = state.get('output_language', 'English')
+    if current_language not in language_options:
+        current_language = 'English'
+    selected_language = st.sidebar.selectbox(
+        'Output Language',
+        options=language_options,
+        index=language_options.index(current_language),
+    )
+    if selected_language != state.get('output_language', 'English'):
+        db.update_system_state({'output_language': selected_language})
+        state = db.get_system_state()
     stage = state['stage']
 
     st.subheader(f'Stage: {stage}')
@@ -228,7 +250,13 @@ def run_app() -> None:
     c1, c2 = st.columns([2, 1])
     with c2:
         st.markdown('### Current State')
-        st.write({'scene_id': state['current_scene_id'], 'plot_id': state['current_plot_id']})
+        st.write(
+            {
+                'scene_id': state['current_scene_id'],
+                'plot_id': state['current_plot_id'],
+                'output_language': state.get('output_language', 'English'),
+            }
+        )
         st.progress(float(state['plot_progress']))
         st.caption('Plot Progress')
         st.progress(float(state['scene_progress']))
@@ -278,6 +306,8 @@ def run_app() -> None:
                     )
                     scenes = bundle.get('scenes', [])
                     knowledge = bundle.get('knowledge', [])
+                    game_rules_knowledge = load_game_rules_knowledge()
+                    all_knowledge = knowledge + game_rules_knowledge
                     structure = bundle.get('structure', {})
                     parse_warnings = bundle.get('warnings', [])
 
@@ -288,8 +318,8 @@ def run_app() -> None:
                     db.reset_story_data()
                     vector.reset()
                     db.insert_scenes(scenes)
-                    db.insert_knowledge(knowledge)
-                    vector.add_from_scenes(scenes, knowledge=knowledge)
+                    db.insert_knowledge(all_knowledge)
+                    vector.add_from_scenes(scenes, knowledge=all_knowledge)
 
                     db.save_summary('parse_structure', json.dumps(structure, ensure_ascii=False))
                     db.save_summary('parse_warnings', json.dumps(parse_warnings, ensure_ascii=False))
@@ -310,7 +340,7 @@ def run_app() -> None:
                     )
 
                     st.success(
-                        f"Script parsed and stored. scenes={len(scenes)}, knowledge={len(knowledge)}, warnings={len(parse_warnings)}"
+                        f"Script parsed and stored. scenes={len(scenes)}, knowledge={len(all_knowledge)}, warnings={len(parse_warnings)}"
                     )
                     st.rerun()
                 except Exception as exc:  # noqa: BLE001

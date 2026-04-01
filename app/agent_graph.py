@@ -39,11 +39,14 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
 - Do not fabricate missing knowledge.
 - Avoid meta commentary.
 - Hidden truth is keeper-only context. Use it for consistency, do not reveal it directly unless current plot already unlocks it.
+- Final response language: {output_language}
+- Write the response entirely in {output_language}.
 
 ## Player Interaction Rules
 
 - The player controls the PC. Do NOT speak for the PC, extend their dialogue, or describe their internal thoughts.
 - After the player acts or speaks, always advance the scene with NPC dialogue, NPC action, or environmental consequences.
+- When a dice roll or player choice is required (e.g., selecting a branch), present it clearly in parentheses ().
 - If the player's action significantly deviates from the main storyline, guide them back naturally through NPC dialogue, NPC actions, or environmental consequences.
 - Focus on describing NPC reactions and changes in the scene.
 - Reveal information gradually. Do not provide too much information at once; encourage player exploration and role-play.
@@ -58,19 +61,11 @@ Use dice rolls for actions involving uncertainty.
 
 Skill checks use **1d100** and produce one of the following outcomes:
 
-- Extreme Success  
-- Hard Success  
-- Success  
-- Failure  
-- Fumble  
-
-Narrative results must scale with the outcome:
-
 - Extreme Success → major advantage or additional information  
 - Hard Success → strong success with extra benefit  
-- Success → normal success  
-- Failure → no meaningful progress  
-- Fumble → severe negative consequence  
+- Regular Success → normal success  
+- Fail → no meaningful progress  
+- Worst Fail → severe negative consequence 
 
 ### Combat
 
@@ -234,6 +229,7 @@ class NarrativeState(TypedDict, total=False):
     mandatory_events: list[str]
     previous_plot_summary: str
     current_scene_summary: str
+    output_language: str
     debug_prompts: list[dict[str, str]]
 
 
@@ -279,6 +275,7 @@ class NarrativeAgent:
             'plot_id': system_state.get('current_plot_id', ''),
             'plot_progress': float(system_state.get('plot_progress', 0.0)),
             'scene_progress': float(system_state.get('scene_progress', 0.0)),
+            'output_language': system_state.get('output_language', 'English'),
             'player_profile': self.db.get_player_profile(),
             'latest_user_input': user_input,
             'conversation_history': [],
@@ -315,6 +312,11 @@ class NarrativeAgent:
     def _llm_call(self, prompt: str, *, step_name: str, model: str = "qwen/qwen3.5-397b-a17b") -> str:
         logger.info("LLM step=%s prompt_length=%s", step_name, len(prompt))
         return call_nvidia_llm(prompt, model=model, step_name=step_name).strip()
+
+    def _get_output_language(self, state: NarrativeState | None = None) -> str:
+        if state and state.get('output_language'):
+            return str(state['output_language'])
+        return str(self.db.get_system_state().get('output_language', 'English'))
 
     def _build_tool_followup_prompt(self, state: NarrativeState) -> str:
         base_prompt = state.get('prompt', '')
@@ -374,6 +376,7 @@ class NarrativeAgent:
             narrative_perspective='Second person',
             response_length='Concise',
             immersion_level='High',
+            output_language=self._get_output_language(state),
             dice_type='{dice_type}',
             reason='{reason}',
             user_input=state['latest_user_input'],
@@ -415,6 +418,7 @@ class NarrativeAgent:
                     follow_prompt = (
                         "Dice Result:\n"
                         f"{state['dice_result']}\n\n"
+                        f"Write the response entirely in {self._get_output_language(state)}.\n"
                         "Continue the narrative response to the player.\n"
                         "Do not output TOOL_CALL again."
                     )
@@ -532,12 +536,23 @@ class NarrativeAgent:
         return cleaned or 'You steady your breath as fate hangs in balance. What do you do next?'
 
     def _fallback_response(self, state: NarrativeState) -> str:
+        output_language = self._get_output_language(state)
         user_input = state['latest_user_input']
         dice_hint = re.search(r'(\d*d\d+)', user_input.lower())
         if dice_hint:
             rolled = self._roll_dice_expr(dice_hint.group(1))
             if rolled:
                 state['dice_result'] = f"{dice_hint.group(1)}: {rolled}"
+        if output_language == 'Chinese':
+            base = f"你的行动是：{user_input}。"
+            if state.get('plot_goal'):
+                base += f"剧情正朝着以下目标推进：{state['plot_goal']}。"
+            if state.get('retrieved_docs'):
+                base += f"相关线索：{state['retrieved_docs'][0]['content']}。"
+            if state.get('dice_result'):
+                base += f"已应用骰子结果（{state['dice_result']}）。"
+            base += '接下来会发生什么？'
+            return base
         base = f"You act: {user_input}. "
         if state.get('plot_goal'):
             base += f"The story advances toward: {state['plot_goal']}. "
@@ -563,6 +578,7 @@ class NarrativeAgent:
         scene = self.db.get_scene(scene_id) or {}
         plot = self.db.get_plot(plot_id) or {}
         previous_scene_summary = self._get_previous_scene_summary(scene_id)
+        output_language = self._get_output_language()
         prompt = f"""
 You are a TRPG Keeper.
 
@@ -577,6 +593,7 @@ Guidelines:
 - Do NOT reveal future events or the full storyline.
 - Do NOT decide the player character’s actions or thoughts.
 - Do NOT ask hook questions.
+- Write the opening entirely in {output_language}.
 
 
 Scene ID: {scene_id}
@@ -594,6 +611,12 @@ Previous Scene Summary: {previous_scene_summary or 'None'}
                 return result
         except Exception:
             pass
+        if output_language == 'Chinese':
+            return (
+                f"夜色笼罩着{scene_id}。你感到命运的下一条线索正在将你向前牵引。\n"
+                f"你当前的直接目标是：{plot.get('plot_goal', '推进剧情')}。\n"
+                "你从哪里开始？"
+            )
         return (
             f"Night settles over {scene_id}. You sense the next thread of fate pulling you forward.\n"
             f"Your immediate objective: {plot.get('plot_goal', 'advance the story')}.\n"

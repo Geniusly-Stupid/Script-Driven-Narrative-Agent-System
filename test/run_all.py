@@ -12,6 +12,7 @@ SCRIPTS = [
     'test_rag.py',
     'test_state.py',
     'test_vector_store.py',
+    'test_rules_loader.py',
     'test_agent_graph.py',
     'test_main.py',
 ]
