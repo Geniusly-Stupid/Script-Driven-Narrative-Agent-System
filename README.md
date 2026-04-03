@@ -1,11 +1,35 @@
 ﻿# Script-Driven Narrative Agent System
 
-A local standalone script-driven narrative agent built as a single Python app.
+A local, standalone AI game master designed for narrative role-playing games. It manages long-context interactive storytelling based on structured scripts, while allowing players to freely explore the story. The system runs as a single Python application and focuses on maintaining coherent plots, consistent characters, and immersive gameplay.
 
-- **LangGraph** orchestrates turn-by-turn narrative execution.
-- **SQLite** stores structured state (scenes, plots, memory, summaries, system state).
-- **Chroma** handles semantic retrieval (RAG) for NPC/location/event knowledge.
-- **Streamlit** provides the interactive UI.
+## Project Overview
+
+### Background
+
+Tabletop role-playing games (TRPGs), such as Call of Cthulhu (CoC) and Dungeons & Dragons (DnD), are popular worldwide. However, traditional gameplay requires a human game master, which limits accessibility. The game master must prepare in advance and may not respond in real time. Accessing scripts in unfamiliar languages is also difficult. An AI game master can reduce these barriers by offering a more accessible, responsive, and multilingual storytelling experience.
+
+### Problem Statement
+
+TRPG scripts are often long, sometimes spanning hundreds of pages, and ongoing player interactions further extend the context. This makes it difficult for standard LLM-based systems to maintain long-term narrative coherence. Common issues include plot drift and inconsistencies in characters and facts.
+
+### Goals
+
+The main goal of the project is to design a script-driven AI game master that manages long-context interactive storytelling for narrative role-playing games. The system aims to:
+
+- Ensure stable plot progression
+- Maintain consistency in characters and facts
+- Support player freedom across story branches
+
+### Technical Highlights
+
+The current implementation reflects these goals through:
+
+- structured scripts organized into scenes and plots
+- plot-level progression control through explicit state updates and completion checks
+- dynamic context construction using memory lookup, retrieval, and response generation
+- separated dice-check detection, deterministic rolling, and final narrative generation
+- CoC rule knowledge ingestion from `database/GameRules.md`
+- multilingual output control in the UI while keeping parsing language-agnostic
 
 
 ## Architecture
@@ -18,15 +42,16 @@ A local standalone script-driven narrative agent built as a single Python app.
                                 v
 +-------------------- LangGraph Narrative Agent -------------------+
 | build_prompt -> retrieve_memory -> generate_retrieval_queries    |
-| -> vector_retrieve -> construct_context -> generate_response     |
-| -> write_memory -> check_plot_completion -> check_scene_completion|
-| -> update_state                                                   |
+| -> vector_retrieve -> construct_context                          |
+| -> check_whether_roll_dice -> (roll_dice or pass)               |
+| -> generate_response -> write_memory                            |
+| -> check_plot_completion -> check_scene_completion -> update_state|
 +-------------------------------+----------------------------------+
                                 |
                  +--------------+--------------+
                  v                             v
             SQLite (structured)          Chroma (semantic)
-      scenes/plots/memory/summaries      npc/location/event docs
+      scenes/plots/memory/summaries      npc/location/event/rule docs
                /system_state             + similarity retrieval
 ```
 
@@ -40,6 +65,7 @@ A local standalone script-driven narrative agent built as a single Python app.
     agent_graph.py
     state.py
     rag.py
+    rules_loader.py
     ui.py
 
 main.py
@@ -58,19 +84,23 @@ Tables:
 - `memory`
 - `summaries`
 - `system_state`
+- `knowledge_base`
 
 Usage in runtime:
 - script parse result persistence
+- external rule knowledge persistence
 - current scene/plot pointer tracking
 - turn memory append/read
 - plot/scene summaries
 - strict stage lifecycle (`upload -> parse -> character -> session`)
+- output language persistence
 
 ### `app/vector_store.py` (Chroma)
 Responsible only for semantic retrieval.
 
 - deterministic local embedding function
 - ingestion from scene/plot entities (NPC, location, events)
+- ingestion from knowledge entries, including CoC rules
 - top-k similarity search for context enrichment
 
 ### `app/parser.py`
@@ -81,8 +111,10 @@ Script ingestion logic.
 - segments scenes into plots (marker/heuristic)
 - extracts goals and entities used by state + RAG
 
+The parser remains language-agnostic and follows the uploaded script content rather than the UI output language setting.
+
 ### `app/agent_graph.py`
-LangGraph orchestration engine (preserved node flow).
+LangGraph orchestration engine for retrieval, dice checks, deterministic roll resolution, and narrative progression.
 
 Nodes:
 1. `build_prompt`
@@ -90,18 +122,22 @@ Nodes:
 3. `generate_retrieval_queries`
 4. `vector_retrieve`
 5. `construct_context`
-6. `generate_response`
-7. `write_memory`
-8. `check_plot_completion`
-9. `check_scene_completion`
-10. `update_state`
+6. `check_whether_roll_dice`
+7. `roll_dice`
+8. `generate_response`
+9. `write_memory`
+10. `check_plot_completion`
+11. `check_scene_completion`
+12. `update_state`
 
-Storage calls are adapted to SQLite, retrieval calls to Chroma. Node sequence and responsibilities remain intact.
+Storage calls are adapted to SQLite, retrieval calls to Chroma, and dice success evaluation is handled deterministically outside the LLM.
 
 ### `app/rag.py`
 RAG helper pipeline:
 - generate retrieval queries from user input + plot goal + events + memory tail
 - classify retrieved docs into prompt sections
+
+Retrieved knowledge includes both script-derived knowledge and rule documents.
 
 ### `app/state.py`
 Progression helpers:
@@ -119,6 +155,12 @@ Flow:
 4. Start narrative chat session
 5. Display scene/plot/progress and retrieved knowledge
 
+The UI also includes:
+- output language selection (`English` / `Chinese`)
+- debug prompt inspection
+- CoC-style assisted character creation
+- visible dice roll and skill check results during play
+
 ## Narrative Turn Execution
 
 For each chat message:
@@ -129,6 +171,8 @@ For each chat message:
 -> `generate_retrieval_queries`
 -> `vector_retrieve` (Chroma)
 -> `construct_context`
+-> `check_whether_roll_dice`
+-> `roll_dice` (only when a check is required)
 -> `generate_response`
 -> `write_memory` (SQLite)
 -> `check_plot_completion`
@@ -142,10 +186,13 @@ For each chat message:
   - chat memory turns
   - summaries
   - global system stage and active pointers
+  - output language
+  - persistent knowledge entries
 
 - **Chroma**: semantic similarity only.
   - vectorized knowledge docs
   - retrieval for context augmentation
+  - retrieval over world knowledge and CoC rule knowledge
 
 This separation keeps deterministic state operations isolated from semantic search operations.
 
@@ -183,6 +230,7 @@ Open the URL shown by Streamlit (usually `http://localhost:8501`).
 
 - This project is designed for local standalone execution.
 - All state is persisted locally (`narrative.db` and `.chroma/`).
+- `database/GameRules.md` is loaded into the knowledge base as Call of Cthulhu rules knowledge.
 
 ## Debug Scripts
 
@@ -204,6 +252,8 @@ Directory contents (each file except `app/ui.py` has a corresponding test):
 * `test/test_rag.py`: Tests `app/rag.py` (query generation and knowledge classification)
 * `test/test_state.py`: Tests `app/state.py` (plot/scene progression and transitions)
 * `test/test_vector_store.py`: Tests `app/vector_store.py` (insertion and retrieval)
+* `test/test_rules_loader.py`: Tests rule chunking + vector insertion + retrieval from `GameRules.md`
+* `test/test_roll_workflow.py`: Tests the separated dice-check workflow and deterministic success evaluation
 * `test/test_agent_graph.py`: Tests `app/agent_graph.py` (complete single-turn workflow)
 * `test/test_main.py`: Tests `main.py` import and entry-point availability
 * `test/run_all.py`: Executes all test scripts sequentially
