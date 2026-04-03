@@ -552,6 +552,7 @@ def run_app() -> None:
                         'user': '',
                         'agent': opening_text,
                         'dice': None,
+                        'skill_check': None,
                         'debug_prompts': list(getattr(agent, 'latest_debug_prompts', [])),
                     }
                 )
@@ -562,7 +563,9 @@ def run_app() -> None:
                     st.chat_message('user').write(turn['user'])
                 st.chat_message('assistant').write(turn['agent'])
                 if turn.get('dice'):
-                    st.caption(f"Dice: {turn['dice']}")
+                    st.caption(f"Dice Roll Result: {turn['dice']}")
+                if turn.get('skill_check'):
+                    st.caption(f"Skill Check Result: {turn['skill_check']}")
                 if debug_mode and turn.get('debug_prompts'):
                     with st.expander('Debug Prompts', expanded=False):
                         for idx, item in enumerate(turn.get('debug_prompts', []), start=1):
@@ -578,6 +581,7 @@ def run_app() -> None:
                         'user': user_msg,
                         'agent': result.get('response', ''),
                         'dice': result.get('dice_result'),
+                        'skill_check': result.get('skill_check_result'),
                         'debug_prompts': result.get('debug_prompts', []),
                     }
                 )

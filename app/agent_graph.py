@@ -17,7 +17,7 @@ from app.vector_store import ChromaStore
 
 logger = logging.getLogger(__name__)
 
-PROMPT_TEMPLATE = """# SYSTEM PROMPT
+RESPONSE_PROMPT_TEMPLATE = """# SYSTEM PROMPT
 
 You are {agent_role}, running an interactive {game_system} narrative experience.
 
@@ -32,7 +32,6 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
 - Tone: {tone_style}
 - Perspective: {narrative_perspective}
 - Length: {response_length}
-- Immersion: {immersion_level}
 
 ## Constraints
 - Use only information provided in Context.
@@ -46,82 +45,37 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
 
 - The player controls the PC. Do NOT speak for the PC, extend their dialogue, or describe their internal thoughts.
 - After the player acts or speaks, always advance the scene with NPC dialogue, NPC action, or environmental consequences.
-- When a dice roll or player choice is required (e.g., selecting a branch), present it clearly in parentheses ().
+- When a dice roll or player choice is required **by the script or situation**, present it clearly and naturally in parentheses (), without breaking immersion.
+    - For skill checks, briefly describe the situation and then indicate the required check, for example:
+      "As you walk past, an elderly lady studies your appearance with clear judgment in her eyes, as if she values status and presentation. (Make an APP or Credit Rating check.)"
+    - For branching choices, present the options in the narrative, then prompt the player to choose, for Example:
+      "You step out of the house. Based on what you know, you could:
+      1. Ask around the neighborhood.
+      2. Search the graveyard.
+         You pause, considering your next move. (Choose one option.)"
+    - Maintain an immersive, in-world (diegetic) tone. Present checks and choices as a natural part of the scene, not as system instructions.
+    - Do NOT present choices or branches every turn. Overusing explicit choices can break immersion and reduce the player’s sense of freedom. Only include them when they are required by script or really necessary for progression.
 - If the player's action significantly deviates from the main storyline, guide them back naturally through NPC dialogue, NPC actions, or environmental consequences.
 - Focus on describing NPC reactions and changes in the scene.
-- Reveal information gradually. Do not provide too much information at once; encourage player exploration and role-play.
+- Reveal information **gradually**. Do NOT provide too much information at once; encourage player exploration and role-play.
 - Do NOT ask rhetorical or leading questions about the PC’s beliefs, thoughts, or motivations.
 - Do NOT ask questions to the player or suggest what they should do next.
 
 ## Game Mechanics
 
-Use dice rolls for actions involving uncertainty.
+* If a dice result is provided, the narrative must strictly reflect the skill check outcome:
 
-### Skill Checks
+  * **Extreme Success**: Reveal critical details, hidden elements, or additional high-value insights beyond normal expectations.
+  * **Hard Success**: Reveal important details clearly and efficiently, possibly with minor additional insight.
+  * **Regular Success**: Reveal expected information necessary to progress.
+  * **Fail**: Withhold key information or provide limited, vague, or inconclusive results.
+  * **Fumble (Worst Fail)**: Introduce significant negative consequences, risks, or complications.
 
-Skill checks use **1d100** and produce one of the following outcomes:
+* Do not fabricate information. Only use information available in the provided context.
 
-- Extreme Success → major advantage or additional information  
-- Hard Success → strong success with extra benefit  
-- Regular Success → normal success  
-- Fail → no meaningful progress  
-- Worst Fail → severe negative consequence 
+  * If the result is a success but no relevant information exists in the context, do not invent new details.
 
-### Combat
-
-Combat actions (attack, dodge, maneuver) require a roll.
-
-Resolve the action by:
-- determining hit, miss, or critical result
-- applying damage
-- updating HP
-- describing the physical outcome
-
-Higher success levels should produce stronger effects.
-
-### Sanity
-
-When the player encounters horror or supernatural events:
-
-- perform a SAN check using a dice roll
-- adjust SAN accordingly
-- reflect psychological effects in the narrative
-
-## Tool Use
-
-Use tools when mechanical resolution is required.
-
-### Dice Roll Tool
-
-Use when:
-- resolving skill checks
-- resolving combat actions
-- resolving sanity checks
-- determining uncertain outcomes
-
-### Call Format
-
-TOOL_CALL: roll_dice
-{{
-  "dice_type": "{dice_type}",
-  "reason": "{reason}"
-}}
-
-Example:
-
-TOOL_CALL: roll_dice
-{{
-  "dice_type": "1d100",
-  "reason": "Sanity check"
-}}
-
-### Rules
-- Call when necessary.
-- Do not fabricate dice results.
-- Do not narrate outcomes before the tool returns.
-- After receiving the result, incorporate it naturally into the story.
-
----
+* Do not mention system processing, hidden prompts, or any tooling in the narrative.
 
 # INSTRUCTION
 
@@ -169,6 +123,9 @@ Previous Plot Summary:
 Current Scene Summary:
 {current_scene_summary}
 
+Recent Conversation:
+{recent_conversation}
+
 ---
 
 # RETRIEVED KNOWLEDGE
@@ -203,6 +160,91 @@ Plot Progress:
 
 Scene Progress:
 {scene_progress_percentage_or_state}
+
+---
+
+# DICE CHECK RESULT
+
+Dice Result:
+{dice_result}
+
+Skill Check Result:
+{skill_check_result}
+"""
+
+ROLL_CHECK_PROMPT_TEMPLATE = """# SYSTEM PROMPT
+
+You are a Call of Cthulhu rules assistant.
+Decide whether the player's latest action requires a deterministic dice skill check.
+
+Return strict JSON only:
+{{
+  "need_check": true or false,
+  "skill": "skill name or SAN or empty string",
+  "reason": "brief English reason",
+  "dice_type": "1d100 or empty string"
+}}
+
+Rules:
+- Use English only.
+- Trigger a skill check only when there is a clear and explicit intent:
+    - The player directly attempts an action that involves uncertainty, risk, investigation, combat, or sanity pressure, or
+    - The Keeper has previously introduced a situation that clearly invites a check, and the player responds to it.
+- Do NOT trigger a skill check if the player has not expressed a clear action or intent.
+  - Passive, vague, or observational actions without a specific goal should not automatically result in a check.
+- A skill check should feel natural within the narrative:
+  - It may be initiated by the player’s action, or
+  - Introduced by the Keeper through the scene, but only becomes active when the player engages with it.
+- Do NOT introduce checks abruptly without narrative or player-driven justification.
+- If no meaningful uncertainty or risk exists, set `need_check` to false.
+- For Call of Cthulhu skill checks, use 1d100.
+- Prefer skill names from the player skill list when possible.
+
+Examples when checks are needed:
+- Searching for hidden evidence -> Spot Hidden
+- Reading strange documents -> Library Use
+- Staying calm before horror -> SAN
+- Forcing a stuck door -> STR
+- Dodging an attack -> DEX or Dodge
+
+Tool usage format reference:
+TOOL_CALL: roll_dice
+{{
+  "dice_type": "1d100",
+  "reason": "Spot Hidden check"
+}}
+
+Player Input:
+{user_input}
+
+Scene ID: {scene_id}
+Plot ID: {plot_id}
+Scene Goal:
+{current_scene_goal}
+
+Scene Description:
+{current_scene_description}
+
+Plot Goal:
+{current_plot_goal}
+
+Mandatory Events:
+{mandatory_events}
+
+Previous Plot Summary:
+{previous_plot_summary}
+
+Current Scene Summary:
+{current_scene_summary}
+
+Recent Conversation:
+{recent_conversation}
+
+Player:
+{player_related_info}
+
+Full Player Skill List:
+{player_skill_list}
 """
 
 KP_OPENING_MARKER = '[KP_OPENING]'
@@ -218,9 +260,15 @@ class NarrativeState(TypedDict, total=False):
     retrieved_docs: list[dict[str, Any]]
     latest_user_input: str
     prompt: str
+    roll_check_prompt: str
     retrieval_queries: list[str]
     response: str
     dice_result: str | None
+    skill_check_result: str | None
+    need_check: bool
+    check_skill: str
+    check_reason: str
+    dice_type: str
     plot_completed: bool
     scene_completed: bool
     scene_goal: str
@@ -248,6 +296,8 @@ class NarrativeAgent:
         workflow.add_node('generate_retrieval_queries', self.generate_retrieval_queries)
         workflow.add_node('vector_retrieve', self.vector_retrieve)
         workflow.add_node('construct_context', self.construct_context)
+        workflow.add_node('check_whether_roll_dice', self.check_whether_roll_dice)
+        workflow.add_node('roll_dice', self.roll_dice)
         workflow.add_node('generate_response', self.generate_response)
         workflow.add_node('write_memory', self.write_memory)
         workflow.add_node('check_plot_completion', self.check_plot_completion)
@@ -259,7 +309,16 @@ class NarrativeAgent:
         workflow.add_edge('retrieve_memory', 'generate_retrieval_queries')
         workflow.add_edge('generate_retrieval_queries', 'vector_retrieve')
         workflow.add_edge('vector_retrieve', 'construct_context')
-        workflow.add_edge('construct_context', 'generate_response')
+        workflow.add_edge('construct_context', 'check_whether_roll_dice')
+        workflow.add_conditional_edges(
+            'check_whether_roll_dice',
+            self._route_after_roll_check,
+            {
+                'roll_dice': 'roll_dice',
+                'generate_response': 'generate_response',
+            },
+        )
+        workflow.add_edge('roll_dice', 'generate_response')
         workflow.add_edge('generate_response', 'write_memory')
         workflow.add_edge('write_memory', 'check_plot_completion')
         workflow.add_edge('check_plot_completion', 'check_scene_completion')
@@ -282,6 +341,11 @@ class NarrativeAgent:
             'retrieved_docs': [],
             'mandatory_events': [],
             'dice_result': None,
+            'skill_check_result': None,
+            'need_check': False,
+            'check_skill': '',
+            'check_reason': '',
+            'dice_type': '',
             'debug_prompts': [],
         }
         result = self.graph.invoke(state)
@@ -318,15 +382,46 @@ class NarrativeAgent:
             return str(state['output_language'])
         return str(self.db.get_system_state().get('output_language', 'English'))
 
-    def _build_tool_followup_prompt(self, state: NarrativeState) -> str:
-        base_prompt = state.get('prompt', '')
-        return (
-            f"{base_prompt}\n\n"
-            "# TOOL RESULT\n"
-            f"roll_dice -> {state['dice_result']}\n\n"
-            "Use the tool result above. Generate the final narrative response to the player only. "
-            "Do not output TOOL_CALL."
-        )
+    def _route_after_roll_check(self, state: NarrativeState) -> str:
+        return 'roll_dice' if state.get('need_check') else 'generate_response'
+
+    def _format_player_skill_list(self, state: NarrativeState) -> str:
+        profile = state.get('player_profile', {}) or {}
+        lines: list[str] = []
+        for group_name in ('occupation', 'personal_interest'):
+            chosen = profile.get('chosen_skill_allocations', {}).get(group_name, [])
+            if chosen:
+                lines.append(f"{group_name.title()} Skills:")
+                lines.extend(str(item) for item in chosen)
+        characteristics = profile.get('characteristics', {})
+        if characteristics:
+            lines.append('Characteristics:')
+            lines.extend(f"{k}:{v}" for k, v in characteristics.items())
+        derived = profile.get('derived_attributes', {})
+        if derived:
+            lines.append('Derived Attributes:')
+            lines.extend(f"{k}:{v}" for k, v in derived.items())
+        return '\n'.join(lines) or 'No player skills available.'
+
+    def _format_recent_conversation(self, state: NarrativeState, rounds: int = 3) -> str:
+        history = state.get('conversation_history', [])[-rounds:]
+        if not history:
+            return 'None'
+        lines: list[str] = []
+        for turn in history:
+            user_text = str(turn.get('user', '')).strip() or '(no player input)'
+            keeper_text = str(turn.get('agent', '')).strip() or '(no keeper response)'
+            lines.append(f"Player: {user_text}")
+            lines.append(f"Keeper: {keeper_text}")
+        return '\n'.join(lines)
+
+    def _parse_roll_check_response(self, text: str) -> dict[str, Any]:
+        match = re.search(r'\{.*\}', text, flags=re.DOTALL)
+        payload = match.group(0) if match else text
+        data = json5.loads(payload)
+        if not isinstance(data, dict):
+            return {}
+        return data
 
     def build_prompt(self, state: NarrativeState) -> NarrativeState:
         return state
@@ -369,16 +464,9 @@ class NarrativeAgent:
 
     def construct_context(self, state: NarrativeState) -> NarrativeState:
         categorized = categorize_docs(state.get('retrieved_docs', []))
-        state['prompt'] = PROMPT_TEMPLATE.format(
-            agent_role='Narrative Agent',
-            game_system='TRPG',
-            tone_style='Immersive and grounded',
-            narrative_perspective='Second person',
-            response_length='Concise',
-            immersion_level='High',
-            output_language=self._get_output_language(state),
-            dice_type='{dice_type}',
-            reason='{reason}',
+        player_skill_list = self._format_player_skill_list(state)
+        recent_conversation = self._format_recent_conversation(state, rounds=3)
+        state['roll_check_prompt'] = ROLL_CHECK_PROMPT_TEMPLATE.format(
             user_input=state['latest_user_input'],
             scene_id=state.get('scene_id', ''),
             plot_id=state.get('plot_id', ''),
@@ -388,46 +476,90 @@ class NarrativeAgent:
             mandatory_events=', '.join(state.get('mandatory_events', [])) or 'None',
             previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
             current_scene_summary=state.get('current_scene_summary', '') or 'None',
-            npc_related_info=categorized['npc_related_info'],
+            recent_conversation=recent_conversation,
             player_related_info=str(state.get('player_profile', {})),
-            location_related_info=categorized['location_related_info'],
-            game_rule_info=categorized['game_rule_info'],
-            world_context_info=categorized['world_context_info'],
-            truth_related_info=categorized['truth_related_info'],
-            item_or_clue_info=categorized['item_or_clue_info'],
-            plot_progress_percentage_or_state=f"{state.get('plot_progress', 0.0):.0%}",
-            scene_progress_percentage_or_state=f"{state.get('scene_progress', 0.0):.0%}",
+            player_skill_list=player_skill_list,
         )
-        self._record_prompt(state, 'turn_main_prompt', state['prompt'])
+        self._record_prompt(state, 'roll_check_prompt', state['roll_check_prompt'])
+        return state
+
+    def check_whether_roll_dice(self, state: NarrativeState) -> NarrativeState:
+        try:
+            raw = self._llm_call(state['roll_check_prompt'], step_name='check_whether_roll_dice')
+            parsed = self._parse_roll_check_response(raw)
+            state['need_check'] = bool(parsed.get('need_check', False))
+            state['check_skill'] = str(parsed.get('skill', '')).strip()
+            state['check_reason'] = str(parsed.get('reason', '')).strip() or state['check_skill'] or 'skill check'
+            state['dice_type'] = str(parsed.get('dice_type', '')).strip() or ('1d100' if state['need_check'] else '')
+            logger.info(
+                "Roll check decision need_check=%s skill=%s reason=%s dice_type=%s",
+                state.get('need_check'),
+                state.get('check_skill'),
+                state.get('check_reason'),
+                state.get('dice_type'),
+            )
+        except Exception as exc:
+            logger.error("Roll check evaluation failed error=%s", exc)
+            state['need_check'] = False
+            state['check_skill'] = ''
+            state['check_reason'] = ''
+            state['dice_type'] = ''
+        return state
+
+    def roll_dice(self, state: NarrativeState) -> NarrativeState:
+        dice_type = state.get('dice_type', '') or '1d100'
+        dice_value = self._roll_dice_expr(dice_type)
+        if dice_value:
+            reason = state.get('check_reason', '') or 'skill check'
+            state['dice_result'] = f"{dice_type}: {dice_value} (reason: {reason})"
+            state['skill_check_result'] = self._build_skill_check_result(
+                state,
+                dice_type,
+                state.get('check_skill', '') or state.get('check_reason', ''),
+                dice_value,
+            )
+            logger.info(
+                "Deterministic roll completed dice_result=%s skill_check_result=%s",
+                state.get('dice_result'),
+                state.get('skill_check_result'),
+            )
         return state
 
     def generate_response(self, state: NarrativeState) -> NarrativeState:
         try:
-            first_pass = self._llm_call(state['prompt'], step_name='main_generation')
-            tool_spec = self._extract_dice_tool_call(first_pass)
-            if tool_spec:
-                logger.info(
-                    "Tool call detected step=tool_call_parse dice_type=%s reason=%s",
-                    tool_spec['dice_type'],
-                    tool_spec['reason'],
-                )
-                dice_value = self._roll_dice_expr(tool_spec['dice_type'])
-                if dice_value:
-                    state['dice_result'] = f"{tool_spec['dice_type']}: {dice_value} (reason: {tool_spec['reason']})"
-                    logger.info("Tool execution step=roll_dice result=%s", state['dice_result'])
-                    follow_prompt = (
-                        "Dice Result:\n"
-                        f"{state['dice_result']}\n\n"
-                        f"Write the response entirely in {self._get_output_language(state)}.\n"
-                        "Continue the narrative response to the player.\n"
-                        "Do not output TOOL_CALL again."
-                    )
-                    self._record_prompt(state, 'turn_followup_tool_prompt', follow_prompt)
-                    state['response'] = self._llm_call(follow_prompt, step_name='tool_followup_generation')
-                else:
-                    state['response'] = self._clean_tool_call_text(first_pass)
-            else:
-                state['response'] = first_pass.strip()
+            categorized = categorize_docs(state.get('retrieved_docs', []))
+            recent_conversation = self._format_recent_conversation(state, rounds=3)
+            state['prompt'] = RESPONSE_PROMPT_TEMPLATE.format(
+                agent_role='Narrative Agent',
+                game_system='TRPG',
+                tone_style='Immersive and grounded',
+                narrative_perspective='Second person',
+                response_length='Concise',
+                output_language=self._get_output_language(state),
+                user_input=state['latest_user_input'],
+                scene_id=state.get('scene_id', ''),
+                plot_id=state.get('plot_id', ''),
+                current_scene_goal=state.get('scene_goal', '') or 'None',
+                current_scene_description=state.get('scene_description', '') or 'None',
+                current_plot_goal=state.get('plot_goal', '') or 'None',
+                mandatory_events=', '.join(state.get('mandatory_events', [])) or 'None',
+                previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
+                current_scene_summary=state.get('current_scene_summary', '') or 'None',
+                recent_conversation=recent_conversation,
+                npc_related_info=categorized['npc_related_info'],
+                player_related_info=str(state.get('player_profile', {})),
+                location_related_info=categorized['location_related_info'],
+                game_rule_info=categorized['game_rule_info'],
+                world_context_info=categorized['world_context_info'],
+                truth_related_info=categorized['truth_related_info'],
+                item_or_clue_info=categorized['item_or_clue_info'],
+                plot_progress_percentage_or_state=f"{state.get('plot_progress', 0.0):.0%}",
+                scene_progress_percentage_or_state=f"{state.get('scene_progress', 0.0):.0%}",
+                dice_result=state.get('dice_result') or 'None',
+                skill_check_result=state.get('skill_check_result') or 'None',
+            )
+            self._record_prompt(state, 'generate_response_prompt', state['prompt'])
+            state['response'] = self._llm_call(state['prompt'], step_name='generate_response')
         except Exception as e:
             logger.error("LLM error in generate_response prompt_length=%s error=%s", len(state.get('prompt', '')), e)
             print("LLM error:", e)
@@ -513,27 +645,83 @@ class NarrativeAgent:
         rolls = [random.randint(1, sides) for _ in range(count)]
         return f"{rolls} (sum={sum(rolls)})"
 
-    def _extract_dice_tool_call(self, llm_output: str) -> dict[str, str] | None:
-        if 'TOOL_CALL' not in llm_output:
-            return None
-        pattern = r'TOOL_CALL:\s*roll_dice\s*(\{.*?\})'
-        m = re.search(pattern, llm_output, flags=re.DOTALL)
-        if not m:
-            return None
-        try:
-            payload = json5.loads(m.group(1))
-        except Exception:
-            return None
-        dice_type = str(payload.get('dice_type', '')).strip()
-        reason = str(payload.get('reason', 'skill check')).strip()
-        if not dice_type:
-            return None
-        return {'dice_type': dice_type, 'reason': reason}
+    def _normalize_skill_name(self, value: str) -> str:
+        return re.sub(r'[^a-z0-9]+', '', (value or '').strip().lower())
 
-    def _clean_tool_call_text(self, text: str) -> str:
-        cleaned = re.sub(r'TOOL_CALL:\s*roll_dice\s*\{.*?\}', '', text, flags=re.DOTALL)
-        cleaned = cleaned.strip()
-        return cleaned or 'You steady your breath as fate hangs in balance. What do you do next?'
+    def _extract_named_value(self, text: str) -> tuple[str, int] | None:
+        if ':' not in text:
+            return None
+        name, raw_value = text.split(':', 1)
+        try:
+            return name.strip(), int(float(raw_value.strip()))
+        except ValueError:
+            return None
+
+    def _resolve_skill_value(self, state: NarrativeState, reason: str) -> tuple[str, int] | None:
+        profile = state.get('player_profile', {}) or {}
+        candidates: dict[str, tuple[str, int]] = {}
+
+        for bucket_name in ('occupation', 'personal_interest'):
+            for entry in profile.get('chosen_skill_allocations', {}).get(bucket_name, []):
+                parsed = self._extract_named_value(str(entry))
+                if parsed:
+                    skill_name, skill_value = parsed
+                    candidates[self._normalize_skill_name(skill_name)] = (skill_name, skill_value)
+
+        for attr_group in ('characteristics', 'derived_attributes'):
+            for skill_name, skill_value in profile.get(attr_group, {}).items():
+                try:
+                    candidates[self._normalize_skill_name(str(skill_name))] = (str(skill_name), int(float(skill_value)))
+                except (TypeError, ValueError):
+                    continue
+
+        reason_norm = self._normalize_skill_name(reason)
+        if not reason_norm:
+            return None
+        if 'sanity' in reason.lower():
+            san_entry = candidates.get('san')
+            if san_entry:
+                return ('SAN', san_entry[1])
+        for key, value in candidates.items():
+            if key and (key in reason_norm or reason_norm in key):
+                return value
+        return None
+
+    def _extract_roll_total(self, dice_text: str) -> int | None:
+        m = re.search(r'sum=(\d+)', dice_text)
+        if m:
+            return int(m.group(1))
+        return None
+
+    def _evaluate_skill_check(self, roll_total: int, skill_value: int) -> str:
+        if roll_total >= 96:
+            return 'Worst Fail'
+        if roll_total <= max(1, skill_value // 5):
+            return 'Extreme Success'
+        if roll_total <= max(1, skill_value // 2):
+            return 'Hard Success'
+        if roll_total <= skill_value:
+            return 'Regular Success'
+        return 'Fail'
+
+    def _build_skill_check_result(
+        self,
+        state: NarrativeState,
+        dice_type: str,
+        reason: str,
+        dice_text: str,
+    ) -> str | None:
+        if self._normalize_skill_name(dice_type) != '1d100':
+            return None
+        roll_total = self._extract_roll_total(dice_text)
+        if roll_total is None:
+            return None
+        resolved = self._resolve_skill_value(state, reason)
+        if resolved is None:
+            return None
+        skill_name, skill_value = resolved
+        outcome = self._evaluate_skill_check(roll_total, skill_value)
+        return f"{skill_name} {skill_value}: {outcome}"
 
     def _fallback_response(self, state: NarrativeState) -> str:
         output_language = self._get_output_language(state)
@@ -543,6 +731,7 @@ class NarrativeAgent:
             rolled = self._roll_dice_expr(dice_hint.group(1))
             if rolled:
                 state['dice_result'] = f"{dice_hint.group(1)}: {rolled}"
+                state['skill_check_result'] = None
         if output_language == 'Chinese':
             base = f"你的行动是：{user_input}。"
             if state.get('plot_goal'):
@@ -560,6 +749,8 @@ class NarrativeAgent:
             base += f"Relevant clue: {state['retrieved_docs'][0]['content']}. "
         if state.get('dice_result'):
             base += f"Dice result applied ({state['dice_result']}). "
+        if state.get('skill_check_result'):
+            base += f"Skill check result applied ({state['skill_check_result']}). "
         base += 'What do you do next?'
         return base
 
