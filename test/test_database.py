@@ -89,6 +89,7 @@ def main() -> int:
         assert 'scene_description' in scene_cols, 'scene_description column migration failed'
         assert 'source_page_start' in scene_cols and 'source_page_end' in scene_cols, 'scene span columns migration failed'
         assert 'source_page_start' in plot_cols and 'source_page_end' in plot_cols, 'plot span columns migration failed'
+        assert 'raw_text' in plot_cols, 'plot raw_text column migration failed'
 
         knowledge_table = db.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_base'"
@@ -111,6 +112,7 @@ def main() -> int:
                         'mandatory_events': ['event_a', 'event_b'],
                         'npc': ['Alice'],
                         'locations': ['Hall'],
+                        'raw_text': 'Line 3\nLine 4',
                         'source_page_start': 3,
                         'source_page_end': 4,
                         'status': 'pending',
@@ -122,6 +124,7 @@ def main() -> int:
                         'mandatory_events': ['event_c'],
                         'npc': ['Bob'],
                         'locations': ['Street'],
+                        'raw_text': 'Line 5',
                         'source_page_start': 5,
                         'source_page_end': 5,
                         'status': 'pending',
@@ -153,6 +156,7 @@ def main() -> int:
         assert fetched.get('source_page_start') == 3 and fetched.get('source_page_end') == 5, 'scene span persistence failed'
         assert len(fetched.get('plots', [])) == 2
         assert fetched['plots'][0].get('source_page_start') == 3
+        assert fetched['plots'][0].get('raw_text') == 'Line 3\nLine 4', 'plot raw_text persistence failed'
 
         fetched_knowledge = db.get_knowledge_by_type('setting')
         print('[test_database] output: fetched knowledge ->', fetched_knowledge)

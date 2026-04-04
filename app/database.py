@@ -37,6 +37,7 @@ class Database:
                 mandatory_events TEXT NOT NULL,
                 npc TEXT NOT NULL,
                 locations TEXT NOT NULL,
+                raw_text TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 progress REAL NOT NULL,
                 source_page_start INTEGER NOT NULL DEFAULT 1,
@@ -103,6 +104,7 @@ class Database:
         self._ensure_column('scenes', 'source_page_end INTEGER NOT NULL DEFAULT 1')
         self._ensure_column('plots', 'source_page_start INTEGER NOT NULL DEFAULT 1')
         self._ensure_column('plots', 'source_page_end INTEGER NOT NULL DEFAULT 1')
+        self._ensure_column('plots', "raw_text TEXT NOT NULL DEFAULT ''")
         self._ensure_column('system_state', "output_language TEXT NOT NULL DEFAULT 'English'")
 
         self.conn.execute(
@@ -174,11 +176,12 @@ class Database:
                         mandatory_events,
                         npc,
                         locations,
+                        raw_text,
                         status,
                         progress,
                         source_page_start,
                         source_page_end
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''',
                     (
                         plot['plot_id'],
@@ -187,6 +190,7 @@ class Database:
                         json.dumps(plot.get('mandatory_events', []), ensure_ascii=False),
                         json.dumps(plot.get('npc', []), ensure_ascii=False),
                         json.dumps(plot.get('locations', []), ensure_ascii=False),
+                        plot.get('raw_text', ''),
                         plot.get('status', 'pending'),
                         float(plot.get('progress', 0.0)),
                         int(plot.get('source_page_start', scene.get('source_page_start', 1))),

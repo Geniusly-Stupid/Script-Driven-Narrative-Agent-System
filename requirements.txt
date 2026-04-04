@@ -4,3 +4,4 @@ chromadb==1.0.20
 pypdf==5.9.0
 requests==2.32.3
 sentence-transformers
+json5

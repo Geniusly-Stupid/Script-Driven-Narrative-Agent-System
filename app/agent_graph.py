@@ -1,11 +1,16 @@
 ﻿from __future__ import annotations
 
-import json5
+import json
 import random
 import re
 from typing import Any, TypedDict
 import traceback
 import logging
+
+try:
+    import json5  # type: ignore[import-not-found]
+except ImportError:
+    json5 = None
 
 from langgraph.graph import END, StateGraph
 
@@ -418,7 +423,8 @@ class NarrativeAgent:
     def _parse_roll_check_response(self, text: str) -> dict[str, Any]:
         match = re.search(r'\{.*\}', text, flags=re.DOTALL)
         payload = match.group(0) if match else text
-        data = json5.loads(payload)
+        loader = json5.loads if json5 is not None else json.loads
+        data = loader(payload)
         if not isinstance(data, dict):
             return {}
         return data

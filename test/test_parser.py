@@ -7,348 +7,406 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.parser import parse_script, parse_script_bundle
+from app.parser import detect_source_type, parse_script, parse_script_bundle, read_uploaded_document
 
 
 def _pages_from_prompt(prompt: str) -> list[int]:
     return [int(match.group(1)) for match in re.finditer(r"\[PAGE\s+(\d+)\]", prompt)]
 
 
-def _mock_llm(prompt: str) -> str:
-    if 'TASK: IDENTIFY_SCRIPT_STRUCTURE_LABELS' in prompt:
-        labels = []
-        for page_no in _pages_from_prompt(prompt):
-            if page_no <= 2:
-                label = 'front'
-            elif page_no <= 6:
-                label = 'story'
-            else:
-                label = 'appendix'
-            labels.append({'page': page_no, 'label': label, 'confidence': 0.92})
-        return json.dumps({'page_labels': labels}, ensure_ascii=False)
+def _extract_scene_heading(prompt: str) -> str:
+    match = re.search(r"Scene Heading:\s*(.+)", prompt)
+    return match.group(1).strip() if match else "Scene"
 
-    if 'TASK: IDENTIFY_SCRIPT_STRUCTURE' in prompt:
-        return json.dumps({'story': {'start_page': 3, 'end_page': 6}}, ensure_ascii=False)
 
-    if 'TASK: EXTRACT_KNOWLEDGE_ONLY' in prompt:
-        if 'Phase: front_knowledge' in prompt:
+def _count_plots_in_metadata_prompt(prompt: str) -> int:
+    return len(re.findall(r"(?m)^Plot \d+$", prompt))
+
+
+def _line_slice(text: str, start: int, end: int) -> str:
+    lines = text.split("\n")
+    return "\n".join(lines[start - 1 : end])
+
+
+def _assert_contiguous_spans(rows: list[dict], start_key: str, end_key: str, expected_start: int, expected_end: int, label: str):
+    previous_end = expected_start - 1
+    for row in rows:
+        start = int(row[start_key])
+        end = int(row[end_key])
+        assert start == previous_end + 1, f"{label} gap/overlap near {row}"
+        assert end >= start, f"{label} inverted span near {row}"
+        previous_end = end
+    assert previous_end == expected_end, f"{label} does not cover expected end"
+
+
+def _mock_pdf_llm(prompt: str) -> str:
+    if "TASK: IDENTIFY_SCRIPT_STRUCTURE" in prompt:
+        return json.dumps({"story": {"start_page": 3, "end_page": 6}}, ensure_ascii=False)
+
+    if "TASK: EXTRACT_KNOWLEDGE_ONLY" in prompt:
+        if "Phase: front_knowledge" in prompt:
             return json.dumps(
                 {
-                    'knowledge': [
+                    "knowledge": [
                         {
-                            'knowledge_type': 'setting',
-                            'title': 'Module Setup',
-                            'content': 'Town setup and campaign constraints.',
-                            'source_page_start': 1,
-                            'source_page_end': 1,
+                            "knowledge_type": "setting",
+                            "title": "Module Setup",
+                            "content": "Town setup and campaign constraints.",
+                            "source_page_start": 1,
+                            "source_page_end": 1,
                         },
                         {
-                            'knowledge_type': 'npc',
-                            'title': 'Important NPC',
-                            'content': 'Key motivations for preface NPC.',
-                            'source_page_start': 2,
-                            'source_page_end': 2,
+                            "knowledge_type": "npc",
+                            "title": "Important NPC",
+                            "content": "Key motivations for preface NPC.",
+                            "source_page_start": 2,
+                            "source_page_end": 2,
                         },
-                    ]
-                },
-                ensure_ascii=False,
-            )
-
-        return json.dumps(
-            {
-                'knowledge': [
-                    {
-                        'knowledge_type': 'rule',
-                        'title': 'Appendix Rule',
-                        'content': 'Optional sanity variant at the end.',
-                        'source_page_start': 7,
-                        'source_page_end': 8,
-                    }
-                ]
-            },
-            ensure_ascii=False,
-        )
-
-    if 'TASK: EXTRACT_STORY_SCENES' in prompt:
-        return json.dumps(
-            {
-                'scenes': [
-                    {
-                        'scene_goal': 'Investigate first incident',
-                        'scene_description': 'The party reaches the square and interviews witnesses. Conflicting accounts push them toward the river and reveal faction pressure. They need to decide whether to trust local militia or follow unofficial clues.',
-                        'scene_summary': 'Opening investigation beat.',
-                        'scene_type': 'normal',
-                        'source_page_start': 3,
-                        'source_page_end': 5,
-                        'plots': [
-                            {
-                                'plot_goal': 'Collect witness account',
-                                'mandatory_events': ['Interview witness'],
-                                'npc': ['Militia Liaison'],
-                                'locations': ['Town Square'],
-                                'source_page_start': 3,
-                                'source_page_end': 5,
-                            }
-                        ],
-                    },
-                    {
-                        'scene_goal': 'Move to next location',
-                        'scene_description': 'The team departs quickly before nightfall.',
-                        'scene_summary': 'Bridge transition.',
-                        'scene_type': 'transition',
-                        'source_page_start': 6,
-                        'source_page_end': 6,
-                        'plots': [
-                            {
-                                'plot_goal': 'Travel to river road',
-                                'mandatory_events': ['Leave square'],
-                                'npc': [],
-                                'locations': ['Road'],
-                                'source_page_start': 6,
-                                'source_page_end': 6,
-                            }
-                        ],
-                    },
-                ]
-            },
-            ensure_ascii=False,
-        )
-
-    if 'TASK: REFINE_SCENE_PLOTS' in prompt:
-        return json.dumps(
-            {
-                'scene_type': 'normal',
-                'plots': [
-                    {
-                        'plot_goal': 'Interview locals and collect baseline testimony',
-                        'mandatory_events': ['Interview witness', 'Cross-check statements'],
-                        'npc': ['Militia Liaison', 'Vendor'],
-                        'locations': ['Town Square'],
-                        'source_page_start': 3,
-                        'source_page_end': 4,
-                    },
-                    {
-                        'plot_goal': 'Follow contradictions toward river lead',
-                        'mandatory_events': ['Spot conflicting clue', 'Choose route'],
-                        'npc': ['Vendor'],
-                        'locations': ['Square Exit'],
-                        'source_page_start': 5,
-                        'source_page_end': 5,
-                    },
-                ],
-            },
-            ensure_ascii=False,
-        )
-
-    return '{}'
-
-
-def _mock_llm_teaser_boundary(prompt: str) -> str:
-    if 'TASK: IDENTIFY_SCRIPT_STRUCTURE_LABELS' in prompt:
-        labels = []
-        for page_no in _pages_from_prompt(prompt):
-            if page_no == 1:
-                labels.append({'page': page_no, 'label': 'story', 'confidence': 0.56})
-            elif page_no <= 4:
-                labels.append({'page': page_no, 'label': 'front', 'confidence': 0.95})
-            elif page_no <= 9:
-                labels.append({'page': page_no, 'label': 'story', 'confidence': 0.91})
-            else:
-                labels.append({'page': page_no, 'label': 'appendix', 'confidence': 0.93})
-        return json.dumps({'page_labels': labels}, ensure_ascii=False)
-
-    if 'TASK: IDENTIFY_SCRIPT_STRUCTURE' in prompt:
-        return json.dumps({'story': {'start_page': 5, 'end_page': 9}}, ensure_ascii=False)
-
-    if 'TASK: EXTRACT_KNOWLEDGE_ONLY' in prompt:
-        if 'Phase: front_knowledge' in prompt:
-            return json.dumps(
-                {
-                    'knowledge': [
-                        {
-                            'knowledge_type': 'background',
-                            'title': 'Front Matter',
-                            'content': 'Campaign setup before main play.',
-                            'source_page_start': 2,
-                            'source_page_end': 4,
-                        }
                     ]
                 },
                 ensure_ascii=False,
             )
         return json.dumps(
             {
-                'knowledge': [
+                "knowledge": [
                     {
-                        'knowledge_type': 'rule',
-                        'title': 'Appendix Note',
-                        'content': 'Post-story optional material.',
-                        'source_page_start': 10,
-                        'source_page_end': 11,
+                        "knowledge_type": "rule",
+                        "title": "Appendix Rule",
+                        "content": "Optional sanity variant at the end.",
+                        "source_page_start": 7,
+                        "source_page_end": 8,
                     }
                 ]
             },
             ensure_ascii=False,
         )
 
-    if 'TASK: EXTRACT_STORY_SCENES' in prompt:
+    if "TASK: EXTRACT_STORY_SCENES" in prompt:
         return json.dumps(
             {
-                'scenes': [
+                "scenes": [
                     {
-                        'scene_goal': 'Start the true adventure',
-                        'scene_description': 'Players enter the actionable story segment and must choose whom to trust. Conflicts escalate over several beats, and each choice changes immediate risks.',
-                        'scene_summary': 'Main story block.',
-                        'scene_type': 'normal',
-                        'source_page_start': 5,
-                        'source_page_end': 9,
-                        'plots': [
+                        "scene_goal": "Investigate first incident",
+                        "scene_description": "The party reaches the square and interviews witnesses. Conflicting accounts push them toward the river and reveal faction pressure. They need to decide whether to trust local militia or follow unofficial clues.",
+                        "scene_summary": "Opening investigation beat.",
+                        "scene_type": "normal",
+                        "source_page_start": 3,
+                        "source_page_end": 5,
+                        "plots": [
                             {
-                                'plot_goal': 'Initial confrontation and information check',
-                                'mandatory_events': ['Meet faction contact'],
-                                'npc': ['Contact'],
-                                'locations': ['Market'],
-                                'source_page_start': 5,
-                                'source_page_end': 7,
+                                "plot_goal": "Collect witness account",
+                                "mandatory_events": ["Interview witness"],
+                                "npc": ["Militia Liaison"],
+                                "locations": ["Town Square"],
+                                "source_page_start": 3,
+                                "source_page_end": 5,
                             }
                         ],
-                    }
+                    },
+                    {
+                        "scene_goal": "Move to next location",
+                        "scene_description": "The team departs quickly before nightfall.",
+                        "scene_summary": "Bridge transition.",
+                        "scene_type": "transition",
+                        "source_page_start": 6,
+                        "source_page_end": 6,
+                        "plots": [
+                            {
+                                "plot_goal": "Travel to river road",
+                                "mandatory_events": ["Leave square"],
+                                "npc": [],
+                                "locations": ["Road"],
+                                "source_page_start": 6,
+                                "source_page_end": 6,
+                            }
+                        ],
+                    },
                 ]
             },
             ensure_ascii=False,
         )
 
-    if 'TASK: REFINE_SCENE_PLOTS' in prompt:
+    if "TASK: REFINE_SCENE_PLOTS" in prompt:
         return json.dumps(
             {
-                'scene_type': 'normal',
-                'plots': [
+                "scene_type": "normal",
+                "plots": [
                     {
-                        'plot_goal': 'Align with one side under uncertainty',
-                        'mandatory_events': ['Choose ally'],
-                        'npc': ['Contact'],
-                        'locations': ['Market'],
-                        'source_page_start': 5,
-                        'source_page_end': 7,
+                        "plot_goal": "Interview locals and collect baseline testimony",
+                        "mandatory_events": ["Interview witness", "Cross-check statements"],
+                        "npc": ["Militia Liaison", "Vendor"],
+                        "locations": ["Town Square"],
+                        "source_page_start": 3,
+                        "source_page_end": 4,
                     },
                     {
-                        'plot_goal': 'Execute the follow-up move and trigger consequences',
-                        'mandatory_events': ['Act on chosen lead'],
-                        'npc': ['Rival'],
-                        'locations': ['Warehouse'],
-                        'source_page_start': 8,
-                        'source_page_end': 9,
+                        "plot_goal": "Follow contradictions toward river lead",
+                        "mandatory_events": ["Spot conflicting clue", "Choose route"],
+                        "npc": ["Vendor"],
+                        "locations": ["Square Exit"],
+                        "source_page_start": 5,
+                        "source_page_end": 5,
                     },
                 ],
             },
             ensure_ascii=False,
         )
 
-    return '{}'
+    return "{}"
+
+
+def _mock_markdown_llm(prompt: str) -> str:
+    if "TASK: EXTRACT_KNOWLEDGE_ONLY" in prompt:
+        return json.dumps(
+            {
+                "knowledge": [
+                    {
+                        "knowledge_type": "background",
+                        "title": "Keeper Information",
+                        "content": "Background lore before play starts.",
+                        "source_page_start": 3,
+                        "source_page_end": 4,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+    if "TASK: CLASSIFY_MARKDOWN_SCENE_CANDIDATES" in prompt:
+        count = len(re.findall(r"(?m)^Candidate \d+$", prompt))
+        return json.dumps(
+            {
+                "decisions": [
+                    {"candidate_index": 1, "action": "keep"},
+                    *[
+                        {"candidate_index": idx, "action": "merge_with_previous"}
+                        for idx in range(2, count + 1)
+                    ],
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+    if "TASK: CLASSIFY_MARKDOWN_PLOT_BLOCKS" in prompt:
+        if "Scene Heading: ASKING AROUND THE NEIGHBORHOOD" in prompt:
+            return json.dumps(
+                {
+                    "decisions": [
+                        {"block_index": 1, "role": "plot", "attach_to": ""},
+                        {"block_index": 2, "role": "auxiliary", "attach_to": "previous"},
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        if "Scene Heading: TALKING TO THE POLICE" in prompt:
+            return json.dumps(
+                {
+                    "decisions": [
+                        {"block_index": 1, "role": "plot", "attach_to": ""},
+                        {"block_index": 2, "role": "plot", "attach_to": ""},
+                        {"block_index": 3, "role": "plot", "attach_to": ""},
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        count = len(re.findall(r"(?m)^Block \d+$", prompt))
+        return json.dumps(
+            {
+                "decisions": [
+                    {"block_index": 1, "role": "plot", "attach_to": ""},
+                    *[
+                        {"block_index": idx, "role": "plot", "attach_to": ""}
+                        for idx in range(2, count + 1)
+                    ],
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+    if "TASK: EXTRACT_FIXED_SCENE_METADATA" in prompt:
+        scene_heading = _extract_scene_heading(prompt)
+        plot_count = _count_plots_in_metadata_prompt(prompt)
+        return json.dumps(
+            {
+                "scene_goal": scene_heading.title(),
+                "scene_description": f"{scene_heading.title()} keeps the playable material together without changing the fixed spans.",
+                "scene_summary": f"{scene_heading.title()} summary.",
+                "scene_type": "transition" if scene_heading.lower() == "conclusion" else "normal",
+                "plots": [
+                    {
+                        "plot_index": idx,
+                        "plot_goal": f"{scene_heading.title()} plot {idx}",
+                        "mandatory_events": [f"Event {idx}"],
+                        "npc": [],
+                        "locations": [],
+                    }
+                    for idx in range(1, plot_count + 1)
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    return "{}"
 
 
 def main() -> int:
     mock_pages = [
-        'Preface setup and table usage notes.',
-        'NPC profiles and hidden truth notes.',
-        'Story begins in town square.',
-        'Witnesses disagree on suspect details.',
-        'Players decide where to investigate next.',
-        'Transition to the river road.',
-        'Appendix: optional rule variants.',
-        'Appendix: enemy stat blocks.',
+        "Preface setup and table usage notes.",
+        "NPC profiles and hidden truth notes.",
+        "Story begins in town square.",
+        "Witnesses disagree on suspect details.",
+        "Players decide where to investigate next.",
+        "Transition to the river road.",
+        "Appendix: optional rule variants.",
+        "Appendix: enemy stat blocks.",
     ]
 
-    print('[test_parser] input pages:')
-    for i, p in enumerate(mock_pages, start=1):
-        print(f'  page{i}: {p}')
+    markdown_text = "\n".join(
+        [
+            "# PAPER CHASE",
+            "",
+            "### KEEPER INFORMATION",
+            "Background lore before play starts.",
+            "",
+            "### START",
+            "Opening lead.",
+            "Opening follow-up.",
+            "",
+            "#### ASKING AROUND THE NEIGHBORHOOD",
+            "Neighbors point toward the cemetery.",
+            "",
+            "##### TWO INVESTIGATORS",
+            "Keeper note for scaling the scene.",
+            "",
+            "#### TALKING TO THE POLICE",
+            "The police are cautious but talkative.",
+            "",
+            "##### About Burglaries in the Area",
+            "Reports connect the thefts to the missing books.",
+            "",
+            "##### Asking About the Cemetery",
+            "An officer shares rumors about late-night visits.",
+            "",
+            "### CONCLUSION",
+            "The investigator chooses the next move.",
+        ]
+    )
+
+    print("[test_parser] input pages:")
+    for idx, page in enumerate(mock_pages, start=1):
+        print(f"  page{idx}: {page}")
 
     try:
-        bundle = parse_script_bundle(mock_pages, pages_per_scene=4, llm_client=_mock_llm)
-        scenes = bundle.get('scenes', [])
-        knowledge = bundle.get('knowledge', [])
-        structure = bundle.get('structure', {})
+        assert detect_source_type("scenario.pdf", "application/pdf") == "pdf"
+        assert detect_source_type("scenario.markdown", "text/markdown") == "markdown"
+        try:
+            detect_source_type("scenario.txt", "text/plain")
+            raise AssertionError("unsupported file type should raise ValueError")
+        except ValueError:
+            pass
 
-        print('[test_parser] output bundle:')
-        print('  structure ->', structure)
-        print('  scenes ->', scenes)
-        print('  knowledge ->', knowledge)
+        bundle = parse_script_bundle(mock_pages, pages_per_scene=4, llm_client=_mock_pdf_llm)
+        structure = bundle.get("structure", {})
+        scenes = bundle.get("scenes", [])
+        knowledge = bundle.get("knowledge", [])
 
-        assert structure.get('story') == {'start_page': 3, 'end_page': 6}
-        assert structure.get('front_knowledge') == {'start_page': 1, 'end_page': 2}
-        assert structure.get('appendix_knowledge') == {'start_page': 7, 'end_page': 8}
+        assert structure.get("story") == {"start_page": 3, "end_page": 6}
+        assert structure.get("front_knowledge") == {"start_page": 1, "end_page": 2}
+        assert structure.get("appendix_knowledge") == {"start_page": 7, "end_page": 8}
+        assert len(knowledge) == 3, "knowledge extraction count mismatch"
+        assert len(scenes) == 2, "scene extraction count mismatch"
+        assert len(scenes[0]["plots"]) == 2, "normal pdf scene should still refine into two plots"
+        assert all(plot.get("raw_text") for scene in scenes for plot in scene.get("plots", [])), "pdf plots should store raw_text"
 
         manual_bundle = parse_script_bundle(
             mock_pages,
             pages_per_scene=4,
-            llm_client=_mock_llm,
+            llm_client=_mock_pdf_llm,
             story_start_page=4,
             story_end_page=6,
         )
-        manual_structure = manual_bundle.get('structure', {})
-        manual_warnings = manual_bundle.get('warnings', [])
-        assert manual_structure.get('front_knowledge') == {'start_page': 1, 'end_page': 3}
-        assert manual_structure.get('story') == {'start_page': 4, 'end_page': 6}
-        assert manual_structure.get('appendix_knowledge') == {'start_page': 7, 'end_page': 8}
-        assert any('manual story range applied (4-6)' in w for w in manual_warnings)
+        manual_structure = manual_bundle.get("structure", {})
+        assert manual_structure.get("front_knowledge") == {"start_page": 1, "end_page": 3}
+        assert manual_structure.get("story") == {"start_page": 4, "end_page": 6}
+        assert manual_structure.get("appendix_knowledge") == {"start_page": 7, "end_page": 8}
 
-        assert len(knowledge) == 3, 'knowledge extraction count mismatch'
-        for item in knowledge:
-            s = item.get('source_page_start', 0)
-            e = item.get('source_page_end', 0)
-            assert not (3 <= s <= 6 and 3 <= e <= 6), 'story pages should not be stored as knowledge'
+        compatibility_scenes = parse_script(mock_pages, pages_per_scene=4, llm_client=_mock_pdf_llm)
+        assert len(compatibility_scenes) == 2, "parse_script compatibility wrapper failed"
 
-        assert len(scenes) == 2, 'scene extraction count mismatch'
-        assert scenes[0]['scene_id'] == 'scene_1'
-        assert scenes[0].get('source_page_start') == 3
-        assert scenes[0].get('source_page_end') == 5
-        assert len(scenes[0].get('plots', [])) >= 2, 'normal scene should have at least two plots after refinement'
+        cropped_doc = read_uploaded_document(
+            "paper_chase.md",
+            markdown_text.encode("utf-8"),
+            start_unit=3,
+            end_unit=24,
+            mime_type="text/markdown",
+        )
+        assert cropped_doc.source_type == "markdown"
+        assert cropped_doc.unit_label == "line"
+        assert cropped_doc.display_start == 3 and cropped_doc.display_end == 24
+        assert cropped_doc.outline, "markdown outline should capture headings"
+        assert all("<img" not in segment.text.lower() for segment in cropped_doc.segments), "decorative image html should be removed"
 
-        assert scenes[1].get('scene_type') == 'transition', 'transition scene type should be preserved'
-        assert len(scenes[1].get('plots', [])) == 1, 'transition scene can keep one plot'
+        markdown_doc = read_uploaded_document(
+            "paper_chase.md",
+            markdown_text.encode("utf-8"),
+            mime_type="text/markdown",
+        )
+        markdown_bundle = parse_script_bundle(
+            source_document=markdown_doc,
+            llm_client=_mock_markdown_llm,
+            story_start_page=6,
+            story_end_page=26,
+        )
 
-        compatibility_scenes = parse_script(mock_pages, pages_per_scene=4, llm_client=_mock_llm)
-        assert len(compatibility_scenes) == 2, 'parse_script compatibility wrapper failed'
+        markdown_structure = markdown_bundle.get("structure", {})
+        markdown_scenes = markdown_bundle.get("scenes", [])
+        markdown_knowledge = markdown_bundle.get("knowledge", [])
+        markdown_source_meta = markdown_bundle.get("source_metadata", {})
 
-        teaser_pages = [
-            'Dramatic teaser line that hints at danger.',
-            'Module setup and constraints.',
-            'Background timeline and true culprit notes.',
-            'NPC profiles and relationship map.',
-            'Story scene starts with playable choices.',
-            'Investigation escalates with branching clues.',
-            'Confrontation with first antagonist.',
-            'Tactical pivot after failed negotiation.',
-            'Scene closes with next objective set.',
-            'Appendix rules and optional variants.',
-            'Appendix stat blocks and references.',
-        ]
-        bundle2 = parse_script_bundle(teaser_pages, pages_per_scene=5, llm_client=_mock_llm_teaser_boundary)
-        structure2 = bundle2.get('structure', {})
-        scenes2 = bundle2.get('scenes', [])
-        knowledge2 = bundle2.get('knowledge', [])
+        assert markdown_structure.get("front_knowledge") == {"start_page": 1, "end_page": 5}
+        assert markdown_structure.get("story") == {"start_page": 6, "end_page": 26}
+        assert markdown_structure.get("appendix_knowledge") is None
+        assert markdown_source_meta.get("source_type") == "markdown"
+        assert markdown_source_meta.get("source_unit_label") == "line"
+        assert len(markdown_knowledge) == 1, "front matter should remain knowledge"
 
-        assert structure2.get('front_knowledge') == {'start_page': 1, 'end_page': 4}
-        assert structure2.get('story') == {'start_page': 5, 'end_page': 9}
-        assert structure2.get('appendix_knowledge') == {'start_page': 10, 'end_page': 11}
+        assert len(markdown_scenes) == 4, "markdown headings should yield four contiguous scenes"
+        _assert_contiguous_spans(markdown_scenes, "source_page_start", "source_page_end", 6, 26, "scene")
 
-        assert scenes2, 'teaser case should still produce story scenes'
-        for scene in scenes2:
-            s = scene.get('source_page_start', 0)
-            e = scene.get('source_page_end', 0)
-            assert 5 <= s <= 9 and 5 <= e <= 9, 'teaser case scene should stay inside story range'
+        expected_scene_spans = [(6, 9), (10, 15), (16, 24), (25, 26)]
+        for scene, expected in zip(markdown_scenes, expected_scene_spans, strict=True):
+            assert (scene["source_page_start"], scene["source_page_end"]) == expected
+            _assert_contiguous_spans(
+                scene["plots"],
+                "source_page_start",
+                "source_page_end",
+                expected[0],
+                expected[1],
+                f"plot in {scene['scene_id']}",
+            )
+            for plot in scene["plots"]:
+                assert plot["source_page_start"] >= scene["source_page_start"]
+                assert plot["source_page_end"] <= scene["source_page_end"]
+                assert plot.get("raw_text"), "markdown plots should keep raw_text"
 
-        for item in knowledge2:
-            s = item.get('source_page_start', 0)
-            e = item.get('source_page_end', 0)
-            assert e <= 4 or s >= 10, 'teaser case knowledge should stay outside story range'
+        assert len(markdown_scenes[0]["plots"]) == 1, "scene without level-5 headings should stay as one plot"
+        assert len(markdown_scenes[1]["plots"]) == 1, "auxiliary-only level-5 heading should merge back into one plot"
+        assert len(markdown_scenes[2]["plots"]) == 3, "scene intro plus substantive level-5 headings should become parallel plots"
+        assert len(markdown_scenes[3]["plots"]) == 1, "conclusion may remain a single plot"
 
-        print('[test_parser] result: PASS')
+        expected_talking_plot_1 = _line_slice(markdown_text, 16, 18)
+        expected_talking_plot_2 = _line_slice(markdown_text, 19, 21)
+        expected_talking_plot_3 = _line_slice(markdown_text, 22, 24)
+        assert markdown_scenes[2]["plots"][0]["raw_text"] == expected_talking_plot_1
+        assert markdown_scenes[2]["plots"][1]["raw_text"] == expected_talking_plot_2
+        assert markdown_scenes[2]["plots"][2]["raw_text"] == expected_talking_plot_3
+
+        print("[test_parser] result: PASS")
         return 0
     except Exception as exc:  # noqa: BLE001
-        print(f'[test_parser] result: FAIL -> {exc}')
+        print(f"[test_parser] result: FAIL -> {exc}")
         return 1
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     raise SystemExit(main())

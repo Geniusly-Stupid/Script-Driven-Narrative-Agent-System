@@ -34,3 +34,5 @@ test/.chroma*/
 .pytest_cache/
 .coverage
 htmlcov/
+
+narrative_dump.txt
