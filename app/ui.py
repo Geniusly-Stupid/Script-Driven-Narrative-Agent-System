@@ -6,7 +6,7 @@ import re
 
 import streamlit as st
 
-from app.agent_graph import KP_OPENING_MARKER, NarrativeAgent
+from app.agent_graph import NarrativeAgent
 from app.database import Database
 from app.parser import detect_source_type, parse_script_bundle, read_uploaded_document
 from app.rules_loader import load_game_rules_knowledge
@@ -686,29 +686,14 @@ def _generate_coc_builds() -> list[dict[str, object]]:
     return builds
 
 
-def _load_messages_from_db(db: Database) -> tuple[list[dict[str, object]], set[str]]:
+def _load_messages_from_db(db: Database) -> list[dict[str, object]]:
     rows = db.conn.execute(
         'SELECT scene_id, plot_id, user, agent FROM memory ORDER BY id ASC'
     ).fetchall()
     messages: list[dict[str, object]] = []
-    shown_openings: set[str] = set()
     for row in rows:
-        scene_id = row['scene_id'] or ''
         user = row['user'] or ''
         agent = row['agent'] or ''
-        if user == KP_OPENING_MARKER:
-            messages.append(
-                {
-                    'user': '',
-                    'agent': agent,
-                    'dice': None,
-                    'skill_check': None,
-                    'debug_prompts': [],
-                }
-            )
-            if scene_id:
-                shown_openings.add(scene_id)
-            continue
         messages.append(
             {
                 'user': user,
@@ -718,7 +703,7 @@ def _load_messages_from_db(db: Database) -> tuple[list[dict[str, object]], set[s
                 'debug_prompts': [],
             }
         )
-    return messages, shown_openings
+    return messages
 
 
 def run_app() -> None:
@@ -729,10 +714,8 @@ def run_app() -> None:
         st.session_state.db = Database('narrative.db')
         st.session_state.vector = ChromaStore('.chroma')
         st.session_state.agent = NarrativeAgent(st.session_state.db, st.session_state.vector)
-        restored_messages, restored_openings = _load_messages_from_db(st.session_state.db)
-        st.session_state.messages = restored_messages
+        st.session_state.messages = _load_messages_from_db(st.session_state.db)
         st.session_state.last_retrieved = []
-        st.session_state.shown_openings = restored_openings
 
     db: Database = st.session_state.db
     vector: ChromaStore = st.session_state.vector
@@ -768,9 +751,21 @@ def run_app() -> None:
         state = db.get_system_state()
     stage = state['stage']
     if stage == 'session' and not st.session_state.messages:
-        restored_messages, restored_openings = _load_messages_from_db(db)
+        restored_messages = _load_messages_from_db(db)
         st.session_state.messages = restored_messages
-        st.session_state.shown_openings = restored_openings
+        if not restored_messages and state.get('current_scene_id') and state.get('current_plot_id'):
+            initial_result = agent.generate_initial_response()
+            st.session_state.last_retrieved = initial_result.get('retrieved_docs', [])
+            st.session_state.messages.append(
+                {
+                    'user': '',
+                    'agent': initial_result.get('response', ''),
+                    'dice': initial_result.get('dice_result'),
+                    'skill_check': initial_result.get('skill_check_result'),
+                    'debug_prompts': initial_result.get('debug_prompts', []),
+                }
+            )
+            st.rerun()
 
     if stage != 'session':
         _render_status_line(state)
@@ -1120,21 +1115,6 @@ def run_app() -> None:
             st.rerun()
 
     else:
-        _render_status_line(state)
-        opening_key = state['current_scene_id']
-        opening_text = agent.ensure_kp_opening(state['current_scene_id'], state['current_plot_id'])
-        if opening_text and opening_key not in st.session_state.shown_openings:
-            st.session_state.messages.append(
-                {
-                    'user': '',
-                    'agent': opening_text,
-                    'dice': None,
-                    'skill_check': None,
-                    'debug_prompts': list(getattr(agent, 'latest_debug_prompts', [])),
-                }
-            )
-            st.session_state.shown_openings.add(opening_key)
-
         for turn in st.session_state.messages:
             if turn['user']:
                 st.chat_message('user').write(turn['user'])
@@ -1146,8 +1126,9 @@ def run_app() -> None:
             if debug_mode and turn.get('debug_prompts'):
                 with st.expander('Debug Prompts', expanded=False):
                     for idx, item in enumerate(turn.get('debug_prompts', []), start=1):
-                        st.caption(f"{idx}. {item.get('name', 'prompt')}")
-                        st.code(item.get('prompt', ''), language='text')
+                        label = f"{idx}. {item.get('name', 'prompt')}"
+                        with st.expander(label, expanded=False):
+                            st.code(item.get('prompt', ''), language='text')
 
         user_msg = st.chat_input('Describe your action...')
         if user_msg:
