@@ -102,6 +102,11 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
   * **Fail**: Withhold key information or provide limited, vague, or inconclusive results.
   * **Fumble (Worst Fail)**: Introduce significant negative consequences, risks, or complications.
 
+* If `Resolved Check Summary` is provided, the relevant check has already been resolved this turn.
+
+  * Do **NOT** ask the player to repeat that same roll.
+  * If `Skill Check Result` is unavailable, still treat the check as resolved and narrate consequences without requesting another roll.
+
 * Do not fabricate information. Only use information available in the provided context.
 
   * If the result is a success but no relevant information exists in the context, do not invent new details.
@@ -280,6 +285,9 @@ Visited Plot Branches:
 
 # DICE CHECK RESULT
 
+Resolved Check Summary:
+{resolved_check_summary}
+
 Dice Result:
 {dice_result}
 
@@ -391,6 +399,7 @@ class NarrativeState(TypedDict, total=False):
     response: str
     dice_result: str | None
     skill_check_result: str | None
+    resolved_check_summary: str
     need_check: bool
     check_skill: str
     check_reason: str
@@ -586,6 +595,7 @@ class NarrativeAgent:
             'latest_turn_text': '',
             'dice_result': None,
             'skill_check_result': None,
+            'resolved_check_summary': '',
             'need_check': False,
             'check_skill': '',
             'check_reason': '',
@@ -678,6 +688,7 @@ class NarrativeAgent:
             'latest_turn_text': '',
             'dice_result': None,
             'skill_check_result': None,
+            'resolved_check_summary': '',
             'need_check': False,
             'check_skill': '',
             'check_reason': '',
@@ -870,13 +881,195 @@ class NarrativeAgent:
         return scene_id == first_scene.get('scene_id') and plot_id == first_plot.get('plot_id')
 
     def _parse_roll_check_response(self, text: str) -> dict[str, Any]:
-        match = re.search(r'\{.*\}', text, flags=re.DOTALL)
-        payload = match.group(0) if match else text
-        loader = json5.loads if json5 is not None else json.loads
-        data = loader(payload)
-        if not isinstance(data, dict):
+        candidates: list[str] = []
+        raw_text = (text or '').strip()
+        if not raw_text:
             return {}
-        return data
+        fenced_blocks = re.findall(r'```(?:json)?\s*(.*?)```', raw_text, flags=re.IGNORECASE | re.DOTALL)
+        for block in fenced_blocks:
+            stripped = block.strip()
+            if stripped:
+                candidates.append(stripped)
+        match = re.search(r'\{.*\}', raw_text, flags=re.DOTALL)
+        if match:
+            candidates.append(match.group(0))
+        candidates.append(raw_text)
+
+        loaders = [json.loads]
+        if json5 is not None:
+            loaders.append(json5.loads)
+
+        for candidate in candidates:
+            for loader in loaders:
+                try:
+                    data = loader(candidate)
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    return data
+        return {}
+
+    def _roll_check_aliases(self, state: NarrativeState) -> dict[str, list[str]]:
+        aliases: dict[str, list[str]] = {
+            'APP': ['app', 'appearance', '外貌'],
+            'Brawl': ['brawl', 'fighting (brawl)', 'fighting', '斗殴', '格斗'],
+            'Charm': ['charm', '魅惑'],
+            'CON': ['con', 'constitution', '体质'],
+            'Credit Rating': ['credit rating', 'credit', '信用评级', '信用'],
+            'DEX': ['dex', 'dexterity', '敏捷'],
+            'Dodge': ['dodge', '闪避'],
+            'EDU': ['edu', 'education', '教育'],
+            'Fast Talk': ['fast talk', '话术', '快速交谈'],
+            'Firearms': ['firearms', 'shooting', '枪械', '射击'],
+            'INT': ['int', 'intelligence', '智力'],
+            'Intimidate': ['intimidate', 'intimidation', '恐吓'],
+            'Law': ['law', '法律'],
+            'Library Use': ['library use', 'library', '图书馆使用'],
+            'Listen': ['listen', '聆听'],
+            'Luck': ['luck', '幸运'],
+            'Navigate': ['navigate', '导航', '领航'],
+            'Persuade': ['persuade', 'persuasion', '说服'],
+            'POW': ['pow', 'power', '意志'],
+            'Psychology': ['psychology', '心理学'],
+            'SAN': ['san', 'sanity', '理智'],
+            'SIZ': ['siz', 'size', '体型'],
+            'Spot Hidden': ['spot hidden', '侦查'],
+            'STR': ['str', 'strength', '力量'],
+            'Track': ['track', 'tracking', '追踪'],
+        }
+        profile = state.get('player_profile', {}) or {}
+        for bucket_name in ('occupation', 'personal_interest'):
+            for entry in profile.get('chosen_skill_allocations', {}).get(bucket_name, []):
+                parsed = self._extract_named_value(str(entry))
+                if not parsed:
+                    continue
+                skill_name, _skill_value = parsed
+                aliases.setdefault(skill_name, [skill_name.lower()])
+        for attr_group in ('characteristics', 'derived_attributes'):
+            for skill_name in profile.get(attr_group, {}):
+                key = str(skill_name)
+                aliases.setdefault(key, [key.lower()])
+        return aliases
+
+    def _find_alias_index(self, text: str, alias: str) -> int:
+        haystack = (text or '').lower()
+        needle = (alias or '').strip().lower()
+        if not haystack or not needle:
+            return -1
+        if re.search(r'[a-z0-9]', needle):
+            match = re.search(rf'(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])', haystack)
+            return -1 if match is None else match.start()
+        return haystack.find(needle)
+
+    def _extract_requested_skills(self, text: str, state: NarrativeState) -> list[str]:
+        normalized = (text or '').strip().lower()
+        if not normalized:
+            return []
+        explicit_markers = ('check', 'roll', '检定', '骰', 'make ', '进行一次', '进行一', '需要', 'required', 'requires')
+        if not any(marker in normalized for marker in explicit_markers):
+            return []
+        negation_markers = (
+            'nothing forces',
+            'no roll',
+            'no check',
+            'no need',
+            'not require',
+            'does not require',
+            "doesn't require",
+            'without a roll',
+            '无需',
+            '不需要',
+            '不用',
+            '没有必要',
+        )
+        segments = [normalized]
+        segments.extend(part.strip() for part in re.findall(r'[\(（]([^()（）]{0,240})[\)）]', normalized) if part.strip())
+        segments.extend(part.strip() for part in re.split(r'[\n\r。！？!?]', normalized) if part.strip())
+
+        found: list[tuple[int, str]] = []
+        seen_pairs: set[tuple[int, str]] = set()
+        for segment in segments:
+            if not any(marker in segment for marker in explicit_markers):
+                continue
+            if any(marker in segment for marker in negation_markers):
+                continue
+            for canonical_name, alias_list in self._roll_check_aliases(state).items():
+                for alias in alias_list:
+                    idx = self._find_alias_index(segment, alias)
+                    if idx < 0:
+                        continue
+                    pair = (idx, canonical_name)
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+                    found.append(pair)
+                    continue
+        found.sort(key=lambda item: item[0])
+
+        ordered: list[str] = []
+        for _idx, name in found:
+            if name not in ordered:
+                ordered.append(name)
+        return ordered
+
+    def _fallback_roll_check_decision(self, state: NarrativeState) -> dict[str, Any]:
+        latest_excerpt = str(state.get('latest_agent_turn_excerpt', '') or '')
+        requested_skills = self._extract_requested_skills(latest_excerpt, state)
+        if requested_skills:
+            preferred = next(
+                (skill for skill in requested_skills if self._resolve_skill_value(state, skill) is not None),
+                requested_skills[0],
+            )
+            return {
+                'need_check': True,
+                'skill': preferred,
+                'reason': f"Keeper prompt requested a {preferred} check.",
+                'dice_type': '1d100',
+            }
+
+        current_plot_skills = self._extract_requested_skills(str(state.get('current_plot_raw_text', '') or ''), state)
+        unique_plot_skills = [skill for skill in current_plot_skills if skill]
+        if len(unique_plot_skills) == 1 and state.get('latest_alignment') != 'off_topic_unrelated':
+            preferred = unique_plot_skills[0]
+            return {
+                'need_check': True,
+                'skill': preferred,
+                'reason': f"Current plot explicitly centers on a {preferred} check.",
+                'dice_type': '1d100',
+            }
+
+        return {'need_check': False, 'skill': '', 'reason': '', 'dice_type': ''}
+
+    def _refresh_resolved_check_summary(self, state: NarrativeState) -> None:
+        dice_result = str(state.get('dice_result') or '').strip()
+        skill_check_result = str(state.get('skill_check_result') or '').strip()
+        check_label = str(state.get('check_skill') or state.get('check_reason') or 'skill check').strip()
+        if skill_check_result:
+            state['resolved_check_summary'] = (
+                f"The {check_label} is already resolved this turn: {skill_check_result}. "
+                f"Recorded roll: {dice_result or 'already applied'}."
+            )
+            return
+        if dice_result:
+            state['resolved_check_summary'] = (
+                f"The {check_label} has already been rolled this turn. "
+                f"Recorded roll: {dice_result}. Do not ask for the same check again."
+            )
+            return
+        state['resolved_check_summary'] = ''
+
+    def _trim_redundant_check_request(self, text: str) -> str:
+        response = (text or '').strip()
+        if not response:
+            return response
+        cleaned = re.sub(
+            r'[\(（][^()（）]{0,160}(?:check|roll|检定|骰子|骰|技能)[^()（）]{0,160}[\)）]',
+            '',
+            response,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        return cleaned.strip()
 
     def build_prompt(self, state: NarrativeState) -> NarrativeState:
         return state
@@ -1001,6 +1194,7 @@ class NarrativeAgent:
             allowed_targets=state.get('allowed_targets', []),
             indirect_targets_via_return=state.get('indirect_targets_via_return', []),
             remaining_required_targets=state.get('remaining_required_targets', []),
+            return_target=state.get('return_target'),
             mandatory_events=state.get('mandatory_events', []),
             redirect_streak=int(state.get('redirect_streak', 0) or 0),
             latest_agent_turn_excerpt=state.get('latest_agent_turn_excerpt', ''),
@@ -1136,6 +1330,7 @@ class NarrativeAgent:
         state['roll_check_prompt'] = ''
         state['dice_result'] = None
         state['skill_check_result'] = None
+        state['resolved_check_summary'] = ''
         state['need_check'] = False
         state['check_skill'] = ''
         state['check_reason'] = ''
@@ -1188,10 +1383,22 @@ class NarrativeAgent:
         try:
             raw = self._llm_call(state['roll_check_prompt'], step_name='check_whether_roll_dice')
             parsed = self._parse_roll_check_response(raw)
-            state['need_check'] = bool(parsed.get('need_check', False))
-            state['check_skill'] = str(parsed.get('skill', '')).strip()
-            state['check_reason'] = str(parsed.get('reason', '')).strip() or state['check_skill'] or 'skill check'
-            state['dice_type'] = str(parsed.get('dice_type', '')).strip() or ('1d100' if state['need_check'] else '')
+            if parsed:
+                state['need_check'] = bool(parsed.get('need_check', False))
+                if state['need_check']:
+                    state['check_skill'] = str(parsed.get('skill', '')).strip()
+                    state['check_reason'] = str(parsed.get('reason', '')).strip() or state['check_skill'] or 'skill check'
+                    state['dice_type'] = str(parsed.get('dice_type', '')).strip() or '1d100'
+                else:
+                    state['check_skill'] = ''
+                    state['check_reason'] = ''
+                    state['dice_type'] = ''
+            else:
+                fallback = self._fallback_roll_check_decision(state)
+                state['need_check'] = bool(fallback.get('need_check', False))
+                state['check_skill'] = str(fallback.get('skill', '')).strip()
+                state['check_reason'] = str(fallback.get('reason', '')).strip()
+                state['dice_type'] = str(fallback.get('dice_type', '')).strip()
             logger.info(
                 "Roll check decision need_check=%s skill=%s reason=%s dice_type=%s",
                 state.get('need_check'),
@@ -1201,10 +1408,12 @@ class NarrativeAgent:
             )
         except Exception as exc:
             logger.error("Roll check evaluation failed error=%s", exc)
-            state['need_check'] = False
-            state['check_skill'] = ''
-            state['check_reason'] = ''
-            state['dice_type'] = ''
+            fallback = self._fallback_roll_check_decision(state)
+            state['need_check'] = bool(fallback.get('need_check', False))
+            state['check_skill'] = str(fallback.get('skill', '')).strip()
+            state['check_reason'] = str(fallback.get('reason', '')).strip()
+            state['dice_type'] = str(fallback.get('dice_type', '')).strip()
+        self._refresh_resolved_check_summary(state)
         return state
 
     def roll_dice(self, state: NarrativeState) -> NarrativeState:
@@ -1224,12 +1433,14 @@ class NarrativeAgent:
                 state.get('dice_result'),
                 state.get('skill_check_result'),
             )
+        self._refresh_resolved_check_summary(state)
         return state
 
     def generate_response(self, state: NarrativeState) -> NarrativeState:
         try:
             categorized = categorize_docs(state.get('retrieved_docs', []))
             recent_conversation = self._format_recent_conversation(state, rounds=3)
+            self._refresh_resolved_check_summary(state)
             state['prompt'] = RESPONSE_PROMPT_TEMPLATE.format(
                 agent_role='Narrative Agent',
                 game_system='TRPG',
@@ -1283,11 +1494,14 @@ class NarrativeAgent:
                 opening_choice_allowed=str(bool(state.get('opening_choice_allowed', False))).lower(),
                 visited_scene_ids_summary=self._list_summary(state.get('visited_scene_ids', [])),
                 visited_plot_ids_summary=self._list_summary(state.get('visited_plot_ids', [])),
+                resolved_check_summary=state.get('resolved_check_summary') or 'None',
                 dice_result=state.get('dice_result') or 'None',
                 skill_check_result=state.get('skill_check_result') or 'None',
             )
             self._record_prompt(state, 'generate_response_prompt', state['prompt'])
             state['response'] = self._llm_call(state['prompt'], step_name='generate_response')
+            if state.get('resolved_check_summary'):
+                state['response'] = self._trim_redundant_check_request(state.get('response', ''))
             if state.get('scene_entry_turn') and not (state.get('latest_user_input') or '').strip() and not bool(state.get('opening_choice_allowed', False)):
                 state['response'] = self._trim_disallowed_opening_choice(state.get('response', ''))
         except Exception as e:
@@ -1588,12 +1802,15 @@ class NarrativeAgent:
             if rolled:
                 state['dice_result'] = f"{dice_hint.group(1)}: {rolled}"
                 state['skill_check_result'] = None
+        self._refresh_resolved_check_summary(state)
         if output_language == 'Chinese':
             base = f"你的行动是：{user_input}。"
             if state.get('plot_goal'):
                 base += f"剧情正朝着以下目标推进：{state['plot_goal']}。"
             if state.get('retrieved_docs'):
                 base += f"相关线索：{state['retrieved_docs'][0]['content']}。"
+            if state.get('resolved_check_summary'):
+                base += f"本回合的检定已结算（{state['resolved_check_summary']}）。"
             if state.get('dice_result'):
                 base += f"已应用骰子结果（{state['dice_result']}）。"
             base += '接下来会发生什么？'
@@ -1603,6 +1820,8 @@ class NarrativeAgent:
             base += f"The story advances toward: {state['plot_goal']}. "
         if state.get('retrieved_docs'):
             base += f"Relevant clue: {state['retrieved_docs'][0]['content']}. "
+        if state.get('resolved_check_summary'):
+            base += f"Resolved check: {state['resolved_check_summary']}. "
         if state.get('dice_result'):
             base += f"Dice result applied ({state['dice_result']}). "
         if state.get('skill_check_result'):

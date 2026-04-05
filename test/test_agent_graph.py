@@ -66,6 +66,8 @@ def _fake_llm(prompt: str, *args, **kwargs) -> str:
                 '"transition_path": "direct", "close_current": false, "confidence": 0.97, '
                 '"reason": "player explicitly chose the library branch"}'
             )
+        if 'Latest Player Input:\nI head to the police station instead.' in prompt:
+            return 'not-json'
         if 'Latest Player Input:\n前往警局，询问近期是否有类似的入室盗窃或失踪案件记录。' in prompt:
             return (
                 '{"action": "target", "target_kind": "scene", "target_id": "scene_police", '
@@ -94,8 +96,10 @@ def _fake_llm(prompt: str, *args, **kwargs) -> str:
             return 'Thomas quietly lays out the case and leaves several leads open to you. (Will you ask about the books first, or go straight to the house?)'
         if 'Scene ID: scene_police' in prompt and 'Plot ID: scene_police_plot_2' in prompt:
             return 'The desk sergeant flips open the recent incident blotter and starts tracing a pattern of break-ins for you.'
+        if 'Scene ID: scene_police' in prompt and 'Plot ID: scene_police_plot_3' in prompt:
+            return 'The duty officer pulls the missing-person file and begins reviewing the disappearances with you.'
         if 'Scene ID: scene_police' in prompt:
-            return 'Inside the station, the duty officer glances up and waits for you to name which case angle you want to pursue.'
+            return 'Inside the station, the duty officer glances up and waits for you to choose a case angle. 1. Recent burglaries. 2. Missing-person reports. (Choose one option.)'
         if 'Scene ID: scene_library' in prompt and 'Player Input:\nI ask about the weather.' in prompt:
             return 'The room gives you nothing for small talk; the archive tables still draw your attention back to the missing obituary.'
         if 'Scene ID: scene_library' in prompt and 'Player Input:\nI start talking about baseball.' in prompt:
@@ -393,7 +397,37 @@ def main() -> int:
         assert 'Plot ID: scene_police_plot_2' in police_topic_prompt
         assert 'Scene ID: scene_police' in police_topic_prompt
 
-        print('[test_agent_graph] case 9: branch via-return choices should enter the next legal scene in the same turn')
+        print('[test_agent_graph] case 9: numeric choice answers should resolve the current police options deterministically')
+        db.close()
+        if db_path.exists():
+            db_path.unlink()
+        db = Database(str(db_path))
+        db.insert_scenes(scenes)
+        db.update_system_state(
+            {
+                'stage': 'session',
+                'current_scene_id': 'scene_start',
+                'current_plot_id': 'scene_start_plot_1',
+                'plot_progress': 0.0,
+                'scene_progress': 0.0,
+                'navigation_state': {},
+                'current_visit_id': 0,
+                'player_profile': {'name': 'Tester'},
+            }
+        )
+        agent = NarrativeAgent(db, DummyVectorStore())
+        agent.set_debug_mode(True)
+        agent.generate_initial_response()
+        agent.run_turn('I head to the police station instead.')
+        police_numeric = agent.run_turn('2')
+        police_numeric_system = db.get_system_state()
+        assert police_numeric.get('pre_response_transition_applied') is True
+        assert police_numeric.get('pre_response_transition_target_kind') == 'plot'
+        assert police_numeric.get('pre_response_transition_target_id') == 'scene_police_plot_3'
+        assert police_numeric_system['current_scene_id'] == 'scene_police'
+        assert police_numeric_system['current_plot_id'] == 'scene_police_plot_3'
+
+        print('[test_agent_graph] case 10: branch via-return choices should enter the next legal scene in the same turn without relying on LLM JSON')
         db.close()
         if db_path.exists():
             db_path.unlink()
@@ -415,7 +449,7 @@ def main() -> int:
         agent.set_debug_mode(True)
         agent.generate_initial_response()
         agent.run_turn('I go straight to the library.')
-        via_return_result = agent.run_turn('我去警局问问最近的入室盗窃案。')
+        via_return_result = agent.run_turn('I head to the police station instead.')
         via_return_system = db.get_system_state()
         via_return_prompt = via_return_result.get('prompt') or ''
         assert via_return_result.get('pre_response_transition_applied') is True
@@ -425,6 +459,36 @@ def main() -> int:
         assert via_return_system['current_plot_id'] == 'scene_police_plot_1'
         assert 'Scene ID: scene_police' in via_return_prompt
         assert 'Scene ID: scene_library' not in via_return_prompt
+
+        print('[test_agent_graph] case 11: explicit branch-to-branch travel should still route via return when LLM JSON is invalid')
+        db.close()
+        if db_path.exists():
+            db_path.unlink()
+        db = Database(str(db_path))
+        db.insert_scenes(scenes)
+        db.update_system_state(
+            {
+                'stage': 'session',
+                'current_scene_id': 'scene_start',
+                'current_plot_id': 'scene_start_plot_1',
+                'plot_progress': 0.0,
+                'scene_progress': 0.0,
+                'navigation_state': {},
+                'current_visit_id': 0,
+                'player_profile': {'name': 'Tester'},
+            }
+        )
+        agent = NarrativeAgent(db, DummyVectorStore())
+        agent.set_debug_mode(True)
+        agent.generate_initial_response()
+        agent.run_turn('I go straight to the library.')
+        fallback_via_return = agent.run_turn('I head to the police station instead.')
+        fallback_via_return_system = db.get_system_state()
+        assert fallback_via_return.get('pre_response_transition_applied') is True
+        assert fallback_via_return.get('pre_response_transition_target_id') == 'scene_police'
+        assert fallback_via_return.get('pre_response_transition_path') == 'via_return'
+        assert fallback_via_return_system['current_scene_id'] == 'scene_police'
+        assert fallback_via_return_system['current_plot_id'] == 'scene_police_plot_1'
 
         db.close()
         print('[test_agent_graph] result: PASS')

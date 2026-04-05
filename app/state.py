@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from copy import deepcopy
 from typing import Any, Callable
+
+try:
+    import json5  # type: ignore[import-not-found]
+except ImportError:
+    json5 = None
 
 from app.database import Database
 from app.llm_client import call_nvidia_llm
@@ -232,19 +238,29 @@ def _extract_json_obj(text: str) -> dict[str, Any] | None:
     if not text:
         return None
     text = text.strip()
-    try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else None
-    except Exception:
-        pass
+    candidates: list[str] = [text]
+    fenced_blocks = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    for block in fenced_blocks:
+        stripped = block.strip()
+        if stripped:
+            candidates.insert(0, stripped)
     match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(0))
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
+    if match:
+        candidates.append(match.group(0))
+
+    loaders = [json.loads]
+    if json5 is not None:
+        loaders.append(json5.loads)
+
+    for candidate in candidates:
+        for loader in loaders:
+            try:
+                data = loader(candidate)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                continue
+    return None
 
 
 def _normalize_text(text: str) -> str:
@@ -614,12 +630,190 @@ def _node_progress(
 
 
 def _target_match_score(text: str, target: dict[str, Any]) -> float:
-    candidates = [
-        str(target.get("label", "")),
-        str(target.get("goal", "")),
-        str(target.get("excerpt", ""))[:300],
-    ]
-    return max((_goal_match_score(text, candidate) for candidate in candidates if candidate), default=0.0)
+    label = str(target.get("label", ""))
+    goal = str(target.get("goal", ""))
+    excerpt = str(target.get("excerpt", ""))[:300]
+
+    label_score = _goal_match_score(text, label)
+    goal_score = _goal_match_score(text, goal)
+    excerpt_score = _goal_match_score(text, excerpt)
+    combined_focus = _goal_match_score(text, " ".join(part for part in (label, goal) if part))
+
+    best = max(label_score, goal_score, combined_focus, min(excerpt_score, 0.6))
+    if label_score >= 0.5 and goal_score >= 0.34:
+        best = max(best, min(1.0, max(label_score, goal_score) + 0.12))
+    if label_score >= 0.9 or goal_score >= 0.9:
+        best = max(best, 0.97)
+    return min(1.0, best)
+
+
+def _same_target(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
+    if not a or not b:
+        return False
+    return (
+        str(a.get("target_kind", "")).strip().lower() == str(b.get("target_kind", "")).strip().lower()
+        and str(a.get("target_id", "")).strip() == str(b.get("target_id", "")).strip()
+    )
+
+
+def _extract_choice_index(user_input: str) -> int | None:
+    normalized = _normalize_text(user_input)
+    if not normalized:
+        return None
+
+    choice_map = {
+        "1": 1,
+        "2": 2,
+        "3": 3,
+        "4": 4,
+        "5": 5,
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "first": 1,
+        "second": 2,
+        "third": 3,
+        "fourth": 4,
+        "fifth": 5,
+        "一": 1,
+        "二": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "第一": 1,
+        "第二": 2,
+        "第三": 3,
+        "第四": 4,
+        "第五": 5,
+    }
+    explicit_choice_markers = ("option", "choice", "choose", "pick", "select", "选", "第")
+    if len(normalized) > 32 and not any(marker in normalized for marker in explicit_choice_markers):
+        return None
+
+    digit_match = re.search(r"(?<!\d)([1-5])(?!\d)", normalized)
+    if digit_match:
+        return int(digit_match.group(1))
+
+    for token, index in choice_map.items():
+        if normalized == token or f" {token} " in f" {normalized} ":
+            return index
+    return None
+
+
+def _build_transition_result(
+    *,
+    current_node_kind: str,
+    target: dict[str, Any],
+    transition_path: str,
+    confidence: float,
+    reason: str,
+) -> dict[str, Any]:
+    close_current = _evaluate_close_current(current_node_kind, target)
+    if transition_path == "via_return":
+        close_current = True
+    if current_node_kind == "hub" and transition_path == "direct" and str(target.get("role", "")) == "branch":
+        close_current = False
+    return {
+        "action": "target",
+        "target_kind": str(target.get("target_kind", "")),
+        "target_id": str(target.get("target_id", "")),
+        "transition_path": transition_path,
+        "close_current": close_current,
+        "confidence": max(0.0, min(1.0, confidence)),
+        "reason": reason,
+    }
+
+
+def _deterministic_pre_response_shortcut(
+    *,
+    user_input: str,
+    current_node_kind: str,
+    choice_prompt_active: bool,
+    alignment: dict[str, Any],
+    best_target: dict[str, Any] | None,
+    best_score: float,
+    candidate_transition_path: str,
+    eligible_targets: list[dict[str, Any]],
+    eligible_indirect_targets: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    ordered_targets = list(eligible_targets) + list(eligible_indirect_targets)
+    choice_index = _extract_choice_index(user_input)
+    if choice_index and 1 <= choice_index <= len(ordered_targets):
+        selected = ordered_targets[choice_index - 1]
+        transition_path = "direct" if choice_index <= len(eligible_targets) else "via_return"
+        reason_prefix = "choice_prompt_numeric_match" if choice_prompt_active else "explicit_numeric_choice_match"
+        return _build_transition_result(
+            current_node_kind=current_node_kind,
+            target=selected,
+            transition_path=transition_path,
+            confidence=0.98,
+            reason=f"{reason_prefix}(index={choice_index})",
+        )
+
+    if choice_prompt_active:
+
+        if best_target and (
+            bool(alignment.get("high_confidence_target_choice")) or best_score >= HIGH_CONFIDENCE_TARGET_THRESHOLD
+        ):
+            if _same_target(best_target, next((target for target in eligible_targets if _same_target(target, best_target)), None)):
+                return _build_transition_result(
+                    current_node_kind=current_node_kind,
+                    target=best_target,
+                    transition_path="direct",
+                    confidence=max(best_score, 0.9),
+                    reason=f"choice_prompt_target_match(score={best_score:.2f})",
+                )
+            if _same_target(
+                best_target,
+                next((target for target in eligible_indirect_targets if _same_target(target, best_target)), None),
+            ):
+                return _build_transition_result(
+                    current_node_kind=current_node_kind,
+                    target=best_target,
+                    transition_path="via_return",
+                    confidence=max(best_score, 0.9),
+                    reason=f"choice_prompt_target_match(score={best_score:.2f})",
+                )
+
+    if current_node_kind == "hub" and best_target and candidate_transition_path == "direct":
+        if bool(alignment.get("high_confidence_target_choice")) and any(
+            _same_target(best_target, target) for target in eligible_targets
+        ):
+            return _build_transition_result(
+                current_node_kind=current_node_kind,
+                target=best_target,
+                transition_path="direct",
+                confidence=max(best_score, 0.88),
+                reason=f"hub_target_match(score={best_score:.2f})",
+            )
+
+    if current_node_kind == "hub" and best_target and candidate_transition_path == "via_return":
+        if bool(alignment.get("high_confidence_target_choice")) and any(
+            _same_target(best_target, target) for target in eligible_indirect_targets
+        ):
+            return _build_transition_result(
+                current_node_kind=current_node_kind,
+                target=best_target,
+                transition_path="via_return",
+                confidence=max(best_score, 0.9),
+                reason=f"hub_via_return_target_match(score={best_score:.2f})",
+            )
+
+    if current_node_kind != "hub" and best_target and candidate_transition_path == "via_return":
+        if bool(alignment.get("high_confidence_target_choice")) and any(
+            _same_target(best_target, target) for target in eligible_indirect_targets
+        ):
+            return _build_transition_result(
+                current_node_kind=current_node_kind,
+                target=best_target,
+                transition_path="via_return",
+                confidence=max(best_score, 0.9),
+                reason=f"non_hub_via_return_target_match(score={best_score:.2f})",
+            )
+
+    return None
 
 
 def _best_target_match(
@@ -753,6 +947,163 @@ def _node_from_target(
     return {}
 
 
+def _target_identity(target: dict[str, Any] | None) -> tuple[str, str]:
+    normalized_target = normalize_target(target or {})
+    return (
+        str(normalized_target.get("target_kind", "")).strip().lower(),
+        str(normalized_target.get("target_id", "")).strip(),
+    )
+
+
+def _node_identity(node: dict[str, Any] | None) -> tuple[str, str]:
+    if not isinstance(node, dict):
+        return ("", "")
+    plot_id = str(node.get("plot_id", "")).strip()
+    if plot_id:
+        return ("plot", plot_id)
+    scene_id = str(node.get("scene_id", "")).strip()
+    if scene_id:
+        return ("scene", scene_id)
+    return ("", "")
+
+
+def _target_matches_identity(target: dict[str, Any] | None, target_kind: str, target_id: str) -> bool:
+    kind, identity = _target_identity(target)
+    return kind == str(target_kind or "").strip().lower() and identity == str(target_id or "").strip()
+
+
+def _via_return_reachable_targets(
+    node: dict[str, Any],
+    nav_state: dict[str, Any],
+    scene_map: dict[str, dict[str, Any]],
+    plot_map: dict[str, dict[str, Any]],
+    *,
+    current_scene_id: str,
+    current_plot_id: str,
+    max_depth: int = 4,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    visited_states: set[tuple[tuple[str, str], bool]] = set()
+    queue: deque[tuple[dict[str, Any], bool, int]] = deque([(node, False, 0)])
+
+    while queue:
+        current_node, connectors_used, depth = queue.popleft()
+        node_key = _node_identity(current_node)
+        state_key = (node_key, connectors_used)
+        if state_key in visited_states:
+            continue
+        visited_states.add(state_key)
+        if depth > max_depth:
+            continue
+
+        navigation = normalize_navigation(current_node.get("navigation"))
+        implicit_return = normalize_target(navigation.get("return_target"))
+        if implicit_return.get("target_kind") and implicit_return.get("target_id"):
+            hydrated_return = _hydrate_target(implicit_return, nav_state, scene_map, plot_map)
+            next_node = _node_from_target(hydrated_return, scene_map, plot_map)
+            if next_node and depth < max_depth:
+                queue.append((next_node, True, depth + 1))
+
+        for target in _allowed_targets_for_node(current_node, nav_state, scene_map, plot_map):
+            if not target.get("eligible"):
+                continue
+            if _target_matches_identity(target, "scene", current_scene_id) or _target_matches_identity(target, "plot", current_plot_id):
+                continue
+
+            role = str(target.get("role", "")).strip().lower()
+            target_key = _target_identity(target)
+            if role == "return":
+                next_node = _node_from_target(target, scene_map, plot_map)
+                if next_node and depth < max_depth:
+                    queue.append((next_node, True, depth + 1))
+                continue
+
+            if connectors_used and target_key not in seen_targets:
+                seen_targets.add(target_key)
+                results.append(target)
+
+    return results
+
+
+def _find_via_return_resolution(
+    node: dict[str, Any],
+    nav_state: dict[str, Any],
+    scene_map: dict[str, dict[str, Any]],
+    plot_map: dict[str, dict[str, Any]],
+    *,
+    target_kind: str,
+    target_id: str,
+    current_scene_id: str,
+    current_plot_id: str,
+    max_depth: int = 4,
+) -> dict[str, Any] | None:
+    normalized_target_kind = str(target_kind or "").strip().lower()
+    normalized_target_id = str(target_id or "").strip()
+    if not normalized_target_kind or not normalized_target_id:
+        return None
+
+    queue: deque[tuple[dict[str, Any], bool, int, list[dict[str, Any]]]] = deque([(node, False, 0, [])])
+    visited_states: set[tuple[tuple[str, str], bool]] = set()
+
+    while queue:
+        current_node, connectors_used, depth, connectors = queue.popleft()
+        node_key = _node_identity(current_node)
+        state_key = (node_key, connectors_used)
+        if state_key in visited_states:
+            continue
+        visited_states.add(state_key)
+        if depth > max_depth:
+            continue
+
+        navigation = normalize_navigation(current_node.get("navigation"))
+        implicit_return = normalize_target(navigation.get("return_target"))
+        if implicit_return.get("target_kind") and implicit_return.get("target_id"):
+            hydrated_return = _hydrate_target(implicit_return, nav_state, scene_map, plot_map)
+            if (
+                hydrated_return.get("eligible")
+                and not _target_matches_identity(hydrated_return, "scene", current_scene_id)
+                and not _target_matches_identity(hydrated_return, "plot", current_plot_id)
+            ):
+                if _target_matches_identity(hydrated_return, normalized_target_kind, normalized_target_id):
+                    return {
+                        "target": hydrated_return,
+                        "parent_node": current_node,
+                        "connectors": connectors,
+                    }
+                next_node = _node_from_target(hydrated_return, scene_map, plot_map)
+                if next_node and depth < max_depth:
+                    queue.append((next_node, True, depth + 1, connectors + [hydrated_return]))
+
+        for target in _allowed_targets_for_node(current_node, nav_state, scene_map, plot_map):
+            if not target.get("eligible"):
+                continue
+            if _target_matches_identity(target, "scene", current_scene_id) or _target_matches_identity(target, "plot", current_plot_id):
+                continue
+
+            role = str(target.get("role", "")).strip().lower()
+            if role == "return":
+                if _target_matches_identity(target, normalized_target_kind, normalized_target_id):
+                    return {
+                        "target": target,
+                        "parent_node": current_node,
+                        "connectors": connectors,
+                    }
+                next_node = _node_from_target(target, scene_map, plot_map)
+                if next_node and depth < max_depth:
+                    queue.append((next_node, True, depth + 1, connectors + [target]))
+                continue
+
+            if connectors_used and _target_matches_identity(target, normalized_target_kind, normalized_target_id):
+                return {
+                    "target": target,
+                    "parent_node": current_node,
+                    "connectors": connectors,
+                }
+
+    return None
+
+
 def _indirect_targets_via_return(
     node: dict[str, Any],
     nav_state: dict[str, Any],
@@ -762,24 +1113,14 @@ def _indirect_targets_via_return(
     current_scene_id: str,
     current_plot_id: str,
 ) -> list[dict[str, Any]]:
-    return_target = normalize_target(normalize_navigation(node.get("navigation")).get("return_target"))
-    if not return_target.get("target_kind") or not return_target.get("target_id"):
-        return []
-
-    return_node = _node_from_target(return_target, scene_map, plot_map)
-    if not return_node:
-        return []
-
-    indirect_targets: list[dict[str, Any]] = []
-    for target in _allowed_targets_for_node(return_node, nav_state, scene_map, plot_map):
-        if not target.get("eligible"):
-            continue
-        if target.get("target_kind") == "scene" and str(target.get("target_id", "")) == current_scene_id:
-            continue
-        if target.get("target_kind") == "plot" and str(target.get("target_id", "")) == current_plot_id:
-            continue
-        indirect_targets.append(target)
-    return indirect_targets
+    return _via_return_reachable_targets(
+        node,
+        nav_state,
+        scene_map,
+        plot_map,
+        current_scene_id=current_scene_id,
+        current_plot_id=current_plot_id,
+    )
 
 
 def _plot_visit_key(plot_id: str, visit_id: int) -> str:
@@ -1221,6 +1562,7 @@ def evaluate_plot_completion(
     eligible_targets = _eligible_targets(allowed_targets)
     eligible_indirect_targets = _eligible_targets(indirect_targets_via_return)
     exit_target = _first_eligible_target_by_role(allowed_targets, "exit")
+    indirect_exit_target = _first_eligible_target_by_role(eligible_indirect_targets, "exit")
     alignment = classify_player_alignment(
         user_input,
         plot_goal=plot_goal,
@@ -1597,6 +1939,7 @@ def evaluate_pre_response_transition(
     allowed_targets: list[dict[str, Any]] | None = None,
     indirect_targets_via_return: list[dict[str, Any]] | None = None,
     remaining_required_targets: list[dict[str, Any]] | None = None,
+    return_target: dict[str, Any] | None = None,
     mandatory_events: list[str] | None = None,
     redirect_streak: int = 0,
     latest_agent_turn_excerpt: str = "",
@@ -1619,9 +1962,11 @@ def evaluate_pre_response_transition(
     allowed_targets = deepcopy(allowed_targets or [])
     indirect_targets_via_return = deepcopy(indirect_targets_via_return or [])
     remaining_required_targets = deepcopy(remaining_required_targets or [])
+    return_target = deepcopy(return_target or {})
     eligible_targets = _eligible_targets(allowed_targets)
     eligible_indirect_targets = _eligible_targets(indirect_targets_via_return)
     exit_target = _first_eligible_target_by_role(allowed_targets, "exit")
+    indirect_exit_target = _first_eligible_target_by_role(eligible_indirect_targets, "exit")
     mandatory_events = list(mandatory_events or [])
     alignment = classify_player_alignment(
         user_input,
@@ -1649,6 +1994,145 @@ def evaluate_pre_response_transition(
         current_plot_raw_text=current_plot_raw_text,
         eligible_targets=eligible_targets,
     )
+    deterministic_shortcut = _deterministic_pre_response_shortcut(
+        user_input=user_input,
+        current_node_kind=current_node_kind,
+        choice_prompt_active=choice_prompt_active,
+        alignment=alignment,
+        best_target=best_target,
+        best_score=best_score,
+        candidate_transition_path=candidate_transition_path,
+        eligible_targets=eligible_targets,
+        eligible_indirect_targets=eligible_indirect_targets,
+    )
+    if deterministic_shortcut is not None:
+        if prompt_recorder is not None:
+            prompt_recorder(
+                f"""
+Deterministic pre-response transition shortcut applied.
+
+Current Node Kind:
+{current_node_kind}
+
+Choice Prompt Active:
+{str(bool(choice_prompt_active)).lower()}
+
+Latest Player Input:
+{user_input}
+
+Latest Player Alignment:
+{alignment.get('summary', 'None')}
+
+Latest Agent Turn Excerpt:
+{latest_agent_turn_excerpt or 'None'}
+
+Eligible Targets:
+{_target_lines(eligible_targets)}
+
+Indirect Targets Via Return:
+{_target_lines(eligible_indirect_targets)}
+
+Selected Transition:
+{json.dumps(deterministic_shortcut, ensure_ascii=False, indent=2)}
+""".strip()
+            )
+        return deterministic_shortcut
+
+    if exit_target and _is_exit_intent(user_input):
+        explicit_exit_shortcut = {
+            "action": "target",
+            "target_kind": str(exit_target.get("target_kind", "")),
+            "target_id": str(exit_target.get("target_id", "")),
+            "transition_path": "direct",
+            "close_current": True,
+            "confidence": 1.0,
+            "reason": "explicit_exit_intent",
+        }
+        if prompt_recorder is not None:
+            prompt_recorder(
+                f"""
+Deterministic explicit-exit shortcut applied.
+
+Latest Player Input:
+{user_input}
+
+Current Node Kind:
+{current_node_kind}
+
+Eligible Direct Exit:
+{_target_lines([exit_target])}
+
+Selected Transition:
+{json.dumps(explicit_exit_shortcut, ensure_ascii=False, indent=2)}
+""".strip()
+            )
+        return explicit_exit_shortcut
+
+    if indirect_exit_target and _is_exit_intent(user_input):
+        explicit_exit_shortcut = {
+            "action": "target",
+            "target_kind": str(indirect_exit_target.get("target_kind", "")),
+            "target_id": str(indirect_exit_target.get("target_id", "")),
+            "transition_path": "via_return",
+            "close_current": True,
+            "confidence": 1.0,
+            "reason": "explicit_exit_intent_via_return",
+        }
+        if prompt_recorder is not None:
+            prompt_recorder(
+                f"""
+Deterministic explicit-exit shortcut applied.
+
+Latest Player Input:
+{user_input}
+
+Current Node Kind:
+{current_node_kind}
+
+Eligible Indirect Exit:
+{_target_lines([indirect_exit_target])}
+
+Selected Transition:
+{json.dumps(explicit_exit_shortcut, ensure_ascii=False, indent=2)}
+""".strip()
+            )
+        return explicit_exit_shortcut
+
+    if (
+        current_node_kind != "hub"
+        and _is_exit_intent(user_input)
+        and str(return_target.get("target_kind", "")).strip()
+        and str(return_target.get("target_id", "")).strip()
+        and bool(return_target.get("eligible", True))
+    ):
+        explicit_exit_shortcut = {
+            "action": "target",
+            "target_kind": str(return_target.get("target_kind", "")),
+            "target_id": str(return_target.get("target_id", "")),
+            "transition_path": "via_return",
+            "close_current": True,
+            "confidence": 1.0,
+            "reason": "explicit_exit_to_return_target",
+        }
+        if prompt_recorder is not None:
+            prompt_recorder(
+                f"""
+Deterministic explicit-exit shortcut applied.
+
+Latest Player Input:
+{user_input}
+
+Current Node Kind:
+{current_node_kind}
+
+Legal Return Target:
+{_target_lines([return_target])}
+
+Selected Transition:
+{json.dumps(explicit_exit_shortcut, ensure_ascii=False, indent=2)}
+""".strip()
+            )
+        return explicit_exit_shortcut
 
     llm_prompt = f"""
 You are a narrative-state evaluator for a script-driven investigation game.
@@ -1845,16 +2329,6 @@ Latest Player Input:
             "reason": "intro_case_acceptance_transition" if case_acceptance else "intro_generic_reply_transition",
         }
 
-    if bool(alignment.get("off_topic_unrelated")):
-        return {
-            "action": "stay",
-            "target_kind": "",
-            "target_id": "",
-            "transition_path": "stay",
-            "close_current": False,
-            "confidence": 0.0,
-            "reason": "off_topic_unrelated",
-        }
     if exit_target and _is_exit_intent(user_input):
         return {
             "action": "target",
@@ -1864,6 +2338,42 @@ Latest Player Input:
             "close_current": True,
             "confidence": 1.0,
             "reason": "explicit_exit_intent",
+        }
+    if indirect_exit_target and _is_exit_intent(user_input):
+        return {
+            "action": "target",
+            "target_kind": str(indirect_exit_target.get("target_kind", "")),
+            "target_id": str(indirect_exit_target.get("target_id", "")),
+            "transition_path": "via_return",
+            "close_current": True,
+            "confidence": 1.0,
+            "reason": "explicit_exit_intent_via_return",
+        }
+    if (
+        current_node_kind != "hub"
+        and _is_exit_intent(user_input)
+        and str(return_target.get("target_kind", "")).strip()
+        and str(return_target.get("target_id", "")).strip()
+        and bool(return_target.get("eligible", True))
+    ):
+        return {
+            "action": "target",
+            "target_kind": str(return_target.get("target_kind", "")),
+            "target_id": str(return_target.get("target_id", "")),
+            "transition_path": "via_return",
+            "close_current": True,
+            "confidence": 1.0,
+            "reason": "explicit_exit_to_return_target",
+        }
+    if bool(alignment.get("off_topic_unrelated")):
+        return {
+            "action": "stay",
+            "target_kind": "",
+            "target_id": "",
+            "transition_path": "stay",
+            "close_current": False,
+            "confidence": 0.0,
+            "reason": "off_topic_unrelated",
         }
     setup_like = _is_setup_or_choice_like(plot_goal, current_plot_raw_text, scene_goal)
     if (
@@ -2037,33 +2547,53 @@ def _resolve_via_return_target(
     plot_map: dict[str, dict[str, Any]],
     current_visit_id: int,
 ) -> dict[str, Any] | None:
-    return_target = normalize_target(normalize_navigation(current_node.get("navigation")).get("return_target"))
-    if not return_target.get("target_kind") or not return_target.get("target_id"):
+    current_scene_id = str(current_node.get("scene_id", "") or "")
+    current_plot_id = str(current_node.get("plot_id", "") or "")
+    resolution = _find_via_return_resolution(
+        current_node,
+        nav_state,
+        scene_map,
+        plot_map,
+        target_kind=target_kind,
+        target_id=target_id,
+        current_scene_id=current_scene_id,
+        current_plot_id=current_plot_id,
+    )
+    if resolution is None:
         return None
 
-    return_node = _node_from_target(return_target, scene_map, plot_map)
-    if not return_node:
-        return None
+    selected_target = resolution["target"]
+    parent_node = resolution["parent_node"]
+    connectors = resolution.get("connectors", [])
+    for connector in connectors:
+        connector_kind, connector_id = _target_identity(connector)
+        _pop_return_frame(nav_state, connector_kind, connector_id)
 
-    selected_target = _find_valid_target(return_node, target_kind, target_id, nav_state, scene_map, plot_map)
-    if selected_target is None:
-        return None
+    parent_navigation = normalize_navigation(parent_node.get("navigation"))
+    parent_return_target = normalize_target(parent_navigation.get("return_target"))
+    if str(selected_target.get("role", "")).strip().lower() == "return" or _target_matches_identity(
+        parent_return_target,
+        str(selected_target.get("target_kind", "")),
+        str(selected_target.get("target_id", "")),
+    ):
+        _pop_return_frame(
+            nav_state,
+            str(selected_target.get("target_kind", "")),
+            str(selected_target.get("target_id", "")),
+        )
 
-    _pop_return_frame(nav_state, str(return_target.get("target_kind", "")), str(return_target.get("target_id", "")))
-
-    return_node_kind = str(return_node.get("node_kind", "linear"))
-    return_node_navigation = normalize_navigation(return_node.get("navigation"))
-    if return_node_kind == "hub" and selected_target.get("role") == "branch":
+    parent_node_kind = str(parent_node.get("node_kind", "linear"))
+    if parent_node_kind == "hub" and selected_target.get("role") == "branch":
         if selected_target.get("target_kind") == "scene":
-            _push_return_frame(nav_state, "scene", str(return_node.get("scene_id", "")), int(current_visit_id))
+            _push_return_frame(nav_state, "scene", str(parent_node.get("scene_id", "")), int(current_visit_id))
         else:
-            _push_return_frame(nav_state, "plot", str(return_node.get("plot_id", "")), int(current_visit_id))
-        if bool(return_node_navigation.get("close_unselected_on_advance")):
-            _mark_sibling_targets_skipped(db, return_node, selected_target, scene_map, plot_map)
+            _push_return_frame(nav_state, "plot", str(parent_node.get("plot_id", "")), int(current_visit_id))
+        if bool(parent_navigation.get("close_unselected_on_advance")):
+            _mark_sibling_targets_skipped(db, parent_node, selected_target, scene_map, plot_map)
 
-    if return_node_kind == "hub" and selected_target.get("role") == "exit":
-        if str(return_node_navigation.get("completion_policy", "")) == "optional_until_exit":
-            _mark_sibling_targets_skipped(db, return_node, selected_target, scene_map, plot_map)
+    if parent_node_kind == "hub" and selected_target.get("role") == "exit":
+        if str(parent_navigation.get("completion_policy", "")) == "optional_until_exit":
+            _mark_sibling_targets_skipped(db, parent_node, selected_target, scene_map, plot_map)
 
     return selected_target
 
@@ -2199,11 +2729,25 @@ def next_story_position(
             selected_target = _default_transition_target(current_scene, nav_state, scene_map, plot_map)
 
     if selected_target is None:
+        current_scene_progress = _node_progress(
+            current_scene,
+            nav_state,
+            scene_map,
+            plot_map,
+            fallback_progress=float(db.get_system_state().get("scene_progress", 0.0)),
+        )
+        current_plot_progress = _node_progress(
+            current_plot,
+            nav_state,
+            scene_map,
+            plot_map,
+            fallback_progress=float(current_plot.get("progress", 0.0) or 0.0),
+        )
         return {
             "current_scene_id": current_scene_id,
             "current_plot_id": current_plot_id,
-            "plot_progress": float(current_plot.get("progress", 0.0) or 0.0),
-            "scene_progress": 0.0,
+            "plot_progress": float(current_plot_progress),
+            "scene_progress": float(current_scene_progress),
             "current_scene_intro": "",
             "navigation_state": nav_state,
             "current_visit_id": int(current_visit_id),
@@ -2243,11 +2787,25 @@ def next_story_position(
 
     next_scene_id, next_plot_id = _target_to_position(selected_target, scene_map, plot_map)
     if not next_scene_id or not next_plot_id:
+        current_scene_progress = _node_progress(
+            current_scene,
+            nav_state,
+            scene_map,
+            plot_map,
+            fallback_progress=float(db.get_system_state().get("scene_progress", 0.0)),
+        )
+        current_plot_progress = _node_progress(
+            current_plot,
+            nav_state,
+            scene_map,
+            plot_map,
+            fallback_progress=float(current_plot.get("progress", 0.0) or 0.0),
+        )
         return {
             "current_scene_id": current_scene_id,
             "current_plot_id": current_plot_id,
-            "plot_progress": float(current_plot.get("progress", 0.0) or 0.0),
-            "scene_progress": 0.0,
+            "plot_progress": float(current_plot_progress),
+            "scene_progress": float(current_scene_progress),
             "current_scene_intro": "",
             "navigation_state": nav_state,
             "current_visit_id": int(current_visit_id),

@@ -446,6 +446,93 @@ def _build_scene_plot_dead_end_db(db_path: Path) -> Database:
     return db
 
 
+def _build_nested_via_return_db(db_path: Path) -> Database:
+    if db_path.exists():
+        db_path.unlink()
+
+    db = Database(str(db_path))
+
+    start_nav = default_navigation(completion_policy='all_required_then_advance')
+    start_nav['allowed_targets'] = [
+        make_target('scene', 'scene_police', label='Police station', role='branch', required=True),
+        make_target('scene', 'scene_newspaper', label='Arnoldsburg Advertiser', role='branch', required=True),
+    ]
+    start_return = make_target('scene', 'scene_start', label='Start hub', role='return')
+    police_hub_return = make_target('scene', 'scene_start', label='Back to town leads', role='return')
+    police_plot_hub_nav = default_navigation(completion_policy='optional_until_exit')
+    police_plot_hub_nav['allowed_targets'] = [
+        make_target('plot', 'scene_police_plot_2', label='Ask about recent burglaries', role='branch'),
+        police_hub_return,
+    ]
+    police_plot_return = make_target('plot', 'scene_police_plot_1', label='Police desk', role='return')
+
+    db.insert_scenes(
+        [
+            _make_mirrored_scene('scene_start', 'Start hub', node_kind='hub', navigation=start_nav, status='in_progress'),
+            {
+                'scene_id': 'scene_police',
+                'scene_goal': 'Police station',
+                'scene_description': 'The desk officer can point you toward the next lead.',
+                'status': 'pending',
+                'scene_summary': '',
+                'node_kind': 'branch',
+                'navigation': {
+                    'allowed_targets': [],
+                    'return_target': start_return,
+                    'completion_policy': 'terminal_on_resolve',
+                    'prerequisites': [],
+                    'close_unselected_on_advance': False,
+                },
+                'plots': [
+                    {
+                        'plot_id': 'scene_police_plot_1',
+                        'plot_goal': 'Choose which police angle to pursue.',
+                        'mandatory_events': [],
+                        'npc': [],
+                        'locations': [],
+                        'raw_text': 'The officer offers a burglary file and can also send you back to the town leads.',
+                        'status': 'pending',
+                        'progress': 0.0,
+                        'node_kind': 'hub',
+                        'navigation': police_plot_hub_nav,
+                    },
+                    {
+                        'plot_id': 'scene_police_plot_2',
+                        'plot_goal': 'Ask about recent burglaries.',
+                        'mandatory_events': [],
+                        'npc': [],
+                        'locations': [],
+                        'raw_text': 'The officer reviews a burglary pattern and mentions the paper may have old morgue files.',
+                        'status': 'pending',
+                        'progress': 0.0,
+                        'node_kind': 'branch',
+                        'navigation': {
+                            'allowed_targets': [],
+                            'return_target': police_plot_return,
+                            'completion_policy': 'terminal_on_resolve',
+                            'prerequisites': [],
+                            'close_unselected_on_advance': False,
+                        },
+                    },
+                ],
+            },
+            _make_mirrored_scene(
+                'scene_newspaper',
+                'Search the Arnoldsburg Advertiser archives.',
+                node_kind='branch',
+                navigation={
+                    'allowed_targets': [],
+                    'return_target': start_return,
+                    'completion_policy': 'terminal_on_resolve',
+                    'prerequisites': [],
+                    'close_unselected_on_advance': False,
+                },
+            ),
+        ]
+    )
+    return db
+
+
 def main() -> int:
     original_llm = state_module.call_nvidia_llm
     try:
@@ -1000,6 +1087,316 @@ def main() -> int:
             {'target_kind': 'plot', 'target_id': 'scene_choice_plot_1', 'visit_id': 0}
         ]
         plot_db.close()
+
+        print('[test_state] case 18: explicit newspaper-office input should prefer the legal newspaper lead over the study')
+        state_module.call_nvidia_llm = _failing_llm
+        newspaper_targets = [
+            dict(
+                make_target(
+                    'scene',
+                    'scene_newspaper',
+                    label='The Arnoldsburg Advertiser',
+                    role='branch',
+                    goal='Search the newspaper office archives with Artie Malloy.',
+                    excerpt='Artie Malloy can grant access to the back issues and morgue files.',
+                ),
+                eligible=True,
+            ),
+            dict(
+                make_target(
+                    'scene',
+                    'scene_study',
+                    label='The Kimball House Study',
+                    role='branch',
+                    goal='Examine the study for clues about Douglas Kimball.',
+                    excerpt='The Kimball house study is full of journals and stacked books.',
+                ),
+                eligible=True,
+            ),
+        ]
+        newspaper_eval = evaluate_pre_response_transition(
+            'I go to the Arnoldsburg Advertiser office and ask Artie Malloy for old newspaper files about the cemetery and the Kimball house.',
+            plot_goal='Choose a lead',
+            scene_goal='Start hub',
+            scene_description='The next leads are the newspaper office and the Kimball study.',
+            current_plot_raw_text='You can search old newspaper back issues or inspect the Kimball house study.',
+            current_node_kind='hub',
+            allowed_targets=newspaper_targets,
+            remaining_required_targets=[],
+            mandatory_events=[],
+            redirect_streak=0,
+            latest_agent_turn_excerpt='The remaining leads are the newspaper office and the study.',
+            choice_prompt_active=False,
+            conversation_history=[],
+        )
+        assert newspaper_eval['action'] == 'target'
+        assert newspaper_eval['target_id'] == 'scene_newspaper'
+        assert newspaper_eval['transition_path'] == 'direct'
+
+        print('[test_state] case 19: terminal completion should preserve scene progress even without a next target')
+        terminal_db_path = ROOT / 'test' / 'debug_state_terminal_resolved.db'
+        if terminal_db_path.exists():
+            terminal_db_path.unlink()
+        terminal_db = Database(str(terminal_db_path))
+        terminal_nav = default_navigation(completion_policy='terminal_on_resolve')
+        terminal_db.insert_scenes(
+            [
+                _make_mirrored_scene(
+                    'scene_end',
+                    'Adventure conclusion',
+                    node_kind='terminal',
+                    navigation=terminal_nav,
+                    status='in_progress',
+                )
+            ]
+        )
+        terminal_db.update_plot('scene_end_plot_1', status='completed', progress=1.0)
+        terminal_db.update_scene('scene_end', {'status': 'completed'})
+        terminal_db.update_system_state(
+            {
+                'stage': 'session',
+                'current_scene_id': 'scene_end',
+                'current_plot_id': 'scene_end_plot_1',
+                'plot_progress': 1.0,
+                'scene_progress': 0.0,
+                'navigation_state': {},
+                'current_visit_id': 0,
+                'player_profile': {'name': 'Tester'},
+            }
+        )
+        terminal_next = next_story_position(
+            terminal_db,
+            'scene_end',
+            'scene_end_plot_1',
+            {},
+            {
+                'action': 'stay',
+                'target_kind': '',
+                'target_id': '',
+                'transition_path': 'stay',
+                'close_current': True,
+                'reason': 'terminal done',
+            },
+            current_visit_id=0,
+        )
+        assert terminal_next['current_scene_id'] == 'scene_end'
+        assert terminal_next['current_plot_id'] == 'scene_end_plot_1'
+        assert terminal_next['plot_progress'] == 1.0
+        assert terminal_next['scene_progress'] == 1.0
+        terminal_eval = evaluate_scene_completion(
+            terminal_db,
+            'scene_end',
+            current_plot_id='scene_end_plot_1',
+            plot_transition={
+                'action': 'stay',
+                'target_kind': '',
+                'target_id': '',
+                'close_current': True,
+                'reason': 'terminal done',
+            },
+            navigation_state={},
+            conversation_history=[],
+            latest_turn_text='User: I finish the adventure.\nAgent: The case ends here.',
+        )
+        assert terminal_eval['completed'] is True
+        assert terminal_eval['reason'] == 'terminal_scene_resolved'
+        terminal_db.close()
+
+        print('[test_state] case 20: explicit non-hub travel should honor legal via-return targets in the same turn')
+        state_module.call_nvidia_llm = _failing_llm
+        via_return_linear_eval = evaluate_pre_response_transition(
+            'I thank the officer, leave the station, and head to the Arnoldsburg Advertiser to search old files.',
+            plot_goal='Ask about Douglas Kimball at the police station.',
+            scene_goal='Police station',
+            scene_description='You are following up police leads about the disappearance.',
+            current_plot_raw_text='The officer can talk about burglaries, suspicious activity, or the missing-person report.',
+            current_node_kind='linear',
+            allowed_targets=[],
+            indirect_targets_via_return=[
+                dict(
+                    make_target(
+                        'scene',
+                        'scene_7',
+                        label='The Arnoldsburg Advertiser',
+                        role='branch',
+                        goal='Search the newspaper office archives with Artie Malloy.',
+                        excerpt='The Arnoldsburg Advertiser keeps old back issues and morgue files.',
+                    ),
+                    eligible=True,
+                ),
+                dict(
+                    make_target(
+                        'scene',
+                        'scene_8',
+                        label='The Kimball House',
+                        role='branch',
+                        goal='Search the Kimball house study for clues.',
+                        excerpt='The Kimball study is packed with books and personal papers.',
+                    ),
+                    eligible=True,
+                ),
+            ],
+            remaining_required_targets=[],
+            mandatory_events=[],
+            redirect_streak=0,
+            latest_agent_turn_excerpt='The missing-person report is exhausted, but you could leave for another lead.',
+            choice_prompt_active=False,
+            conversation_history=[],
+        )
+        assert via_return_linear_eval['action'] == 'target'
+        assert via_return_linear_eval['target_id'] == 'scene_7'
+        assert via_return_linear_eval['transition_path'] == 'via_return'
+
+        print('[test_state] case 21: explicit numeric answers should still resolve legal options even if choice_prompt_active is false')
+        numeric_without_flag = evaluate_pre_response_transition(
+            'I choose option 3 and ask about the missing-person report.',
+            plot_goal='Choose which police topic to pursue.',
+            scene_goal='Police station',
+            scene_description='The desk officer offers three case angles.',
+            current_plot_raw_text='You can ask about burglaries, suspicious activity, or the missing-person report.',
+            current_node_kind='linear',
+            allowed_targets=[
+                dict(make_target('plot', 'scene_6_plot_2', label='Ask about recent burglaries', role='branch'), eligible=True),
+                dict(make_target('plot', 'scene_6_plot_3', label='Ask about suspicious activity', role='branch'), eligible=True),
+                dict(make_target('plot', 'scene_6_plot_4', label='Ask about Douglas Kimball missing-person report', role='branch'), eligible=True),
+            ],
+            indirect_targets_via_return=[],
+            remaining_required_targets=[],
+            mandatory_events=[],
+            redirect_streak=0,
+            latest_agent_turn_excerpt='The officer lays out three angles: 1. burglaries 2. suspicious activity 3. missing-person report.',
+            choice_prompt_active=False,
+            conversation_history=[],
+        )
+        assert numeric_without_flag['action'] == 'target'
+        assert numeric_without_flag['target_kind'] == 'plot'
+        assert numeric_without_flag['target_id'] == 'scene_6_plot_4'
+        assert numeric_without_flag['transition_path'] == 'direct'
+
+        print('[test_state] case 22: nested via-return should expose only downstream actionable targets and land there in one turn')
+        nested_db = _build_nested_via_return_db(ROOT / 'test' / 'debug_state_nested_via_return.db')
+        to_police = next_story_position(
+            nested_db,
+            'scene_start',
+            'scene_start_plot_1',
+            {},
+            {
+                'action': 'target',
+                'target_kind': 'scene',
+                'target_id': 'scene_police',
+                'transition_path': 'direct',
+                'close_current': False,
+                'reason': 'enter police branch',
+            },
+            current_visit_id=0,
+        )
+        to_burglaries = next_story_position(
+            nested_db,
+            'scene_police',
+            'scene_police_plot_1',
+            to_police['navigation_state'],
+            {
+                'action': 'target',
+                'target_kind': 'plot',
+                'target_id': 'scene_police_plot_2',
+                'transition_path': 'direct',
+                'close_current': False,
+                'reason': 'choose burglary file',
+            },
+            current_visit_id=to_police['current_visit_id'],
+        )
+        nested_ctx = story_position_context(
+            nested_db,
+            'scene_police',
+            'scene_police_plot_2',
+            to_burglaries['navigation_state'],
+            current_visit_id=to_burglaries['current_visit_id'],
+        )
+        nested_indirect_ids = {target['target_id'] for target in nested_ctx['indirect_targets_via_return']}
+        assert 'scene_newspaper' in nested_indirect_ids
+        assert 'scene_start' not in nested_indirect_ids
+        nested_eval = evaluate_pre_response_transition(
+            'I leave the station and head to the Arnoldsburg Advertiser to search the old morgue files.',
+            plot_goal='Ask about recent burglaries.',
+            scene_goal='Police station',
+            scene_description='The desk officer can point you toward the next lead.',
+            current_plot_raw_text='The officer reviews a burglary pattern and mentions the paper may have old morgue files.',
+            current_node_kind='branch',
+            allowed_targets=nested_ctx['allowed_targets'],
+            indirect_targets_via_return=nested_ctx['indirect_targets_via_return'],
+            remaining_required_targets=[],
+            mandatory_events=[],
+            redirect_streak=0,
+            latest_agent_turn_excerpt='The officer mentions that the Arnoldsburg Advertiser keeps useful old morgue files.',
+            choice_prompt_active=False,
+            conversation_history=[],
+        )
+        assert nested_eval['action'] == 'target'
+        assert nested_eval['target_kind'] == 'scene'
+        assert nested_eval['target_id'] == 'scene_newspaper'
+        assert nested_eval['transition_path'] == 'via_return'
+        nested_next = next_story_position(
+            nested_db,
+            'scene_police',
+            'scene_police_plot_2',
+            to_burglaries['navigation_state'],
+            nested_eval,
+            current_visit_id=to_burglaries['current_visit_id'],
+        )
+        assert nested_next['current_scene_id'] == 'scene_newspaper'
+        assert nested_next['current_plot_id'] == 'scene_newspaper_plot_1'
+        nested_db.close()
+
+        print('[test_state] case 23: explicit next-step intent should prefer a legal via-return exit over unrelated branches')
+        explicit_next_step_eval = evaluate_pre_response_transition(
+            'I am done here and want to move on to the next step.',
+            plot_goal='Search the Kimball house study for clues.',
+            scene_goal='Kimball house study',
+            scene_description='The study is cluttered with books and scattered notes.',
+            current_plot_raw_text='You have searched the obvious shelves and desk drawers.',
+            current_node_kind='branch',
+            allowed_targets=[],
+            indirect_targets_via_return=[
+                dict(make_target('scene', 'scene_3', label='Asking around the neighborhood', role='branch'), eligible=True),
+                dict(make_target('scene', 'scene_9', label='next steps', role='exit'), eligible=True),
+            ],
+            remaining_required_targets=[],
+            mandatory_events=[],
+            redirect_streak=0,
+            latest_agent_turn_excerpt='The study feels exhausted, and the broader investigation now points toward the next phase.',
+            choice_prompt_active=False,
+            conversation_history=[],
+        )
+        assert explicit_next_step_eval['action'] == 'target'
+        assert explicit_next_step_eval['target_id'] == 'scene_9'
+        assert explicit_next_step_eval['transition_path'] == 'via_return'
+        assert explicit_next_step_eval['reason'] == 'explicit_exit_intent_via_return'
+
+        print('[test_state] case 24: explicit next-step intent should return to the legal hub when no exit is unlocked yet')
+        return_to_hub_eval = evaluate_pre_response_transition(
+            'I am done here and want to move on to the next step.',
+            plot_goal='Search the Kimball house study for clues.',
+            scene_goal='Kimball house study',
+            scene_description='The study is cluttered with books and scattered notes.',
+            current_plot_raw_text='You have searched the obvious shelves and desk drawers.',
+            current_node_kind='branch',
+            allowed_targets=[],
+            indirect_targets_via_return=[
+                dict(make_target('scene', 'scene_3', label='Asking around the neighborhood', role='branch'), eligible=True),
+                dict(make_target('scene', 'scene_4', label='Looking around the graveyard', role='branch'), eligible=True),
+            ],
+            remaining_required_targets=[],
+            return_target=dict(make_target('scene', 'scene_2', label='start', role='return'), eligible=True),
+            mandatory_events=[],
+            redirect_streak=0,
+            latest_agent_turn_excerpt='The study feels exhausted, but the next-step hub is not unlocked yet.',
+            choice_prompt_active=False,
+            conversation_history=[],
+        )
+        assert return_to_hub_eval['action'] == 'target'
+        assert return_to_hub_eval['target_id'] == 'scene_2'
+        assert return_to_hub_eval['transition_path'] == 'via_return'
+        assert return_to_hub_eval['reason'] == 'explicit_exit_to_return_target'
 
         print('[test_state] result: PASS')
         return 0

@@ -84,11 +84,20 @@ def main() -> int:
         def fake_agent_llm(prompt: str, model=None, *, step_name: str = 'generation', max_retries: int = 3, timeout: int | float = 120) -> str:
             if step_name == 'check_whether_roll_dice':
                 if _extract_player_input(prompt) == 'i search the archive shelves for hidden marks.':
-                    return '{"need_check": true, "skill": "Spot Hidden", "reason": "Spot Hidden check", "dice_type": "1d100"}'
+                    return '```json\n{"need_check": true, "skill": "Spot Hidden", "reason": "Spot Hidden check", "dice_type": "1d100"}\n```'
+                if _extract_player_input(prompt) == 'i search the back issues carefully.':
+                    return 'Will likely need a follow-up roll.'
+                if _extract_player_input(prompt) == 'i head deeper into the records room.':
+                    return 'Not a JSON payload.'
                 return '{"need_check": false, "skill": "", "reason": "", "dice_type": ""}'
             if step_name == 'generate_response':
                 if 'Skill Check Result:\nSpot Hidden 60: Extreme Success' in prompt:
                     return 'You quickly notice fresh scratches and a hidden blood mark behind the shelves.'
+                if 'Skill Check Result:\nLibrary Use 50: Extreme Success' in prompt:
+                    assert 'Resolved Check Summary:\nThe Library Use is already resolved this turn:' in prompt
+                    return 'You quickly trace the relevant article and pull the right bound volume from the shelf.'
+                if 'Player Input:\nI head deeper into the records room.' in prompt:
+                    return 'You pull out a stack of bound registers and pause at a dusty index drawer. (Make a Library Use check.)'
                 return 'You move carefully through the library, but nothing forces a roll at this moment.'
             return 'OK'
 
@@ -116,6 +125,20 @@ def main() -> int:
         assert result_without_check.get('need_check') is False, 'check should not be triggered'
         assert result_without_check.get('dice_result') is None, 'dice result should stay empty when no check is needed'
         assert result_without_check.get('skill_check_result') is None, 'skill result should stay empty when no check is needed'
+
+        result_prompted_check = agent.run_turn('I head deeper into the records room.')
+        print('[test_roll_workflow] output with keeper-prompted check ->', result_prompted_check)
+        assert result_prompted_check.get('need_check') is False, 'first setup turn should just present the prompted check'
+        assert '(Make a Library Use check.)' in (result_prompted_check.get('response') or '')
+
+        result_followup_check = agent.run_turn('I search the back issues carefully.')
+        print('[test_roll_workflow] output after malformed roll-check JSON ->', result_followup_check)
+        assert result_followup_check.get('need_check') is True, 'explicit keeper prompt should trigger fallback roll handling'
+        assert result_followup_check.get('check_skill') == 'Library Use'
+        assert result_followup_check.get('skill_check_result') == 'Library Use 50: Hard Success'
+        assert result_followup_check.get('resolved_check_summary'), 'resolved check summary should be populated'
+        assert 'Make a Library Use check' not in (result_followup_check.get('response') or ''), 'response should not ask for the same roll again'
+        assert 'Resolved Check Summary:' in (result_followup_check.get('prompt') or '')
 
         assert agent._evaluate_skill_check(12, 60) == 'Extreme Success'
         assert agent._evaluate_skill_check(25, 60) == 'Hard Success'
