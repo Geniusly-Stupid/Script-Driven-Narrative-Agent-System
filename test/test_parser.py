@@ -394,12 +394,82 @@ def main() -> int:
         assert len(markdown_scenes[2]["plots"]) == 3, "scene intro plus substantive level-5 headings should become parallel plots"
         assert len(markdown_scenes[3]["plots"]) == 1, "conclusion may remain a single plot"
 
+        start_scene = markdown_scenes[0]
+        asking_scene = markdown_scenes[1]
+        talking_scene = markdown_scenes[2]
+        conclusion_scene = markdown_scenes[3]
+        assert start_scene["node_kind"] == "hub", "START should become a hub scene"
+        assert start_scene["navigation"]["completion_policy"] == "all_required_then_advance"
+        assert any(target["role"] == "branch" for target in start_scene["navigation"]["allowed_targets"])
+        assert any(target["role"] == "exit" for target in start_scene["navigation"]["allowed_targets"])
+        assert asking_scene["node_kind"] == "branch", "scene under START should become a branch scene"
+        assert asking_scene["navigation"]["return_target"]["target_id"] == start_scene["scene_id"]
+        assert talking_scene["node_kind"] == "branch", "parallel scene under START should become a branch scene"
+        assert talking_scene["plots"][0]["node_kind"] == "hub", "topic-selection plot should become a plot hub"
+        assert talking_scene["plots"][0]["navigation"]["completion_policy"] == "optional_until_exit"
+        assert any(target["target_kind"] == "plot" and target["role"] == "branch" for target in talking_scene["plots"][0]["navigation"]["allowed_targets"])
+        assert any(target["target_kind"] == "scene" and target["role"] == "return" for target in talking_scene["plots"][0]["navigation"]["allowed_targets"])
+        assert conclusion_scene["node_kind"] == "terminal", "CONCLUSION should become a terminal scene"
+
         expected_talking_plot_1 = _line_slice(markdown_text, 16, 18)
         expected_talking_plot_2 = _line_slice(markdown_text, 19, 21)
         expected_talking_plot_3 = _line_slice(markdown_text, 22, 24)
         assert markdown_scenes[2]["plots"][0]["raw_text"] == expected_talking_plot_1
         assert markdown_scenes[2]["plots"][1]["raw_text"] == expected_talking_plot_2
         assert markdown_scenes[2]["plots"][2]["raw_text"] == expected_talking_plot_3
+
+        branch_markdown_text = "\n".join(
+            [
+                "### START",
+                "The case opens with two leads.",
+                "",
+                "#### ASK AROUND",
+                "Neighbors share what they saw last night.",
+                "",
+                "#### CHECK THE LIBRARY",
+                "The archives may hold a record of the family name.",
+                "",
+                "### NEXT STEPS",
+                "Once enough is learned, the investigator can press on or wrap up.",
+                "",
+                "#### THE CHAPEL",
+                "A suspicious priest watches the investigator carefully.",
+                "",
+                "##### Exploring the crypt",
+                "The investigator risks opening the sealed chamber.",
+                "",
+                "##### Ignoring the crypt",
+                "The investigator leaves the crypt untouched for now.",
+                "",
+                "### CONCLUSION",
+                "The investigator decides how to end the matter.",
+            ]
+        )
+        branch_doc = read_uploaded_document(
+            "branching_scene.md",
+            branch_markdown_text.encode("utf-8"),
+            mime_type="text/markdown",
+        )
+        branch_bundle = parse_script_bundle(
+            source_document=branch_doc,
+            llm_client=_mock_markdown_llm,
+            story_start_page=1,
+            story_end_page=len(branch_markdown_text.splitlines()),
+        )
+        branch_scenes = branch_bundle.get("scenes", [])
+        assert len(branch_scenes) == 6, "branching markdown should produce six scenes"
+        assert branch_scenes[0]["node_kind"] == "hub"
+        assert branch_scenes[0]["navigation"]["completion_policy"] == "all_required_then_advance"
+        assert branch_scenes[3]["node_kind"] == "hub", "NEXT STEPS should become an optional hub"
+        assert branch_scenes[3]["navigation"]["completion_policy"] == "optional_until_exit"
+        assert any(target["target_id"] == branch_scenes[5]["scene_id"] and target["role"] == "exit" for target in branch_scenes[3]["navigation"]["allowed_targets"])
+        chapel_scene = branch_scenes[4]
+        assert chapel_scene["plots"][0]["node_kind"] == "hub", "conditional plot intro should become a plot hub"
+        assert chapel_scene["plots"][0]["navigation"]["completion_policy"] == "exclusive_choice"
+        assert chapel_scene["plots"][0]["navigation"]["close_unselected_on_advance"] is True
+        assert chapel_scene["plots"][1]["node_kind"] == "branch"
+        assert chapel_scene["plots"][2]["node_kind"] == "branch"
+        assert branch_scenes[5]["node_kind"] == "terminal"
 
         print("[test_parser] result: PASS")
         return 0

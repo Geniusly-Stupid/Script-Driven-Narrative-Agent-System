@@ -234,6 +234,33 @@ def _inject_demo_theme() -> None:
             background: rgba(215, 177, 74, 0.42);
         }
 
+        .stButton > button[kind="tertiary"] {
+            border-radius: 999px;
+            border: 1px solid rgba(0, 39, 76, 0.14);
+            background: rgba(255, 251, 244, 0.78);
+            color: rgba(20, 33, 46, 0.94);
+            font-weight: 600;
+            font-size: 0.8rem;
+            letter-spacing: 0.01em;
+            padding: 0.18rem 0.78rem;
+            min-height: 2rem;
+            box-shadow: 0 1px 0 rgba(0, 39, 76, 0.03);
+            backdrop-filter: blur(6px);
+        }
+
+        .stButton > button[kind="tertiary"]:hover {
+            border-color: rgba(0, 39, 76, 0.22);
+            background: rgba(255, 252, 247, 0.96);
+            color: var(--um-blue);
+        }
+
+        .stButton > button[kind="tertiary"]:disabled {
+            opacity: 0.5;
+            background: rgba(255, 251, 244, 0.62);
+            color: rgba(31, 45, 58, 0.5);
+            border-color: rgba(0, 39, 76, 0.1);
+        }
+
         .stTextInput input,
         .stTextArea textarea,
         .stNumberInput input,
@@ -706,6 +733,108 @@ def _load_messages_from_db(db: Database) -> list[dict[str, object]]:
     return messages
 
 
+STORY_RUNTIME_SESSION_KEYS = (
+    'coc_builds',
+    'character_stats_line',
+    'selected_archetype_name',
+    'occupation_alloc_text',
+    'interest_alloc_text',
+    'character_name_input',
+    'character_background_input',
+    'build_pick_label',
+)
+
+
+def _clear_story_runtime_session_state() -> None:
+    st.session_state.messages = []
+    st.session_state.last_retrieved = []
+    for key in STORY_RUNTIME_SESSION_KEYS:
+        st.session_state.pop(key, None)
+
+
+def _bump_script_upload_nonce() -> None:
+    st.session_state.script_upload_nonce = int(st.session_state.get('script_upload_nonce', 0)) + 1
+
+
+def _set_story_notice(kind: str, text: str) -> None:
+    st.session_state.story_notice = {'kind': kind, 'text': text}
+
+
+def _render_story_notice() -> None:
+    notice = st.session_state.pop('story_notice', None)
+    if not isinstance(notice, dict):
+        return
+    text = str(notice.get('text', '')).strip()
+    if not text:
+        return
+    kind = str(notice.get('kind', 'info')).strip().lower()
+    if kind == 'success':
+        st.success(text)
+    elif kind == 'warning':
+        st.warning(text)
+    elif kind == 'error':
+        st.error(text)
+    else:
+        st.info(text)
+
+
+def _reset_to_upload_stage(db: Database, vector: ChromaStore) -> None:
+    db.reset_story_data()
+    db.delete_initial_story_snapshot()
+    vector.reset()
+    db.update_system_state(
+        {
+            'stage': 'upload',
+            'current_scene_id': '',
+            'current_plot_id': '',
+            'plot_progress': 0.0,
+            'scene_progress': 0.0,
+            'player_profile': {},
+            'current_scene_intro': '',
+            'navigation_state': {},
+            'current_visit_id': 0,
+        }
+    )
+    _clear_story_runtime_session_state()
+    _bump_script_upload_nonce()
+
+
+def _render_story_management_actions(stage: str, db: Database, vector: ChromaStore) -> None:
+    if stage == 'upload':
+        return
+
+    spacer_col, action_col1, action_col2 = st.columns([6.0, 1.05, 1.25])
+    with action_col1:
+        restart_clicked = st.button(
+            'Restart Game',
+            key=f'restart_game_{stage}',
+            use_container_width=True,
+            disabled=not db.has_initial_story_snapshot(),
+            type='tertiary',
+        )
+    with action_col2:
+        reparse_clicked = st.button(
+            'Parse New Script',
+            key=f'parse_new_script_{stage}',
+            use_container_width=True,
+            type='tertiary',
+        )
+
+    if restart_clicked:
+        try:
+            db.restore_initial_story_snapshot()
+            _clear_story_runtime_session_state()
+            _set_story_notice('success', 'Game restarted from the parsed snapshot.')
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f'Restart failed: {exc}')
+
+    if reparse_clicked:
+        _reset_to_upload_stage(db, vector)
+        _set_story_notice('success', 'Story data cleared. Upload a new script to parse.')
+        st.rerun()
+
+
 def run_app() -> None:
     st.set_page_config(page_title='Script-Driven Narrative Agent', layout='wide')
     _inject_demo_theme()
@@ -725,15 +854,16 @@ def run_app() -> None:
         agent = st.session_state.agent
 
     state = db.get_system_state()
-    existing_rule_items = [
-        item for item in db.get_knowledge_by_type('rule') if item.get('metadata', {}).get('source') == 'database/GameRules.md'
-    ]
-    if not existing_rule_items:
-        game_rules_knowledge = load_game_rules_knowledge()
-        if game_rules_knowledge:
-            db.insert_knowledge(game_rules_knowledge)
-            vector.add_from_scenes([], knowledge=game_rules_knowledge)
-            state = db.get_system_state()
+    if state.get('stage') != 'upload':
+        existing_rule_items = [
+            item for item in db.get_knowledge_by_type('rule') if item.get('metadata', {}).get('source') == 'database/GameRules.md'
+        ]
+        if not existing_rule_items:
+            game_rules_knowledge = load_game_rules_knowledge()
+            if game_rules_knowledge:
+                db.insert_knowledge(game_rules_knowledge)
+                vector.add_from_scenes([], knowledge=game_rules_knowledge)
+                state = db.get_system_state()
     language_options = ['English', 'Chinese']
     current_language = state.get('output_language', 'English')
     if current_language not in language_options:
@@ -750,6 +880,8 @@ def run_app() -> None:
         db.update_system_state({'output_language': selected_language})
         state = db.get_system_state()
     stage = state['stage']
+    _render_story_management_actions(stage, db, vector)
+    _render_story_notice()
     if stage == 'session' and not st.session_state.messages:
         restored_messages = _load_messages_from_db(db)
         st.session_state.messages = restored_messages
@@ -777,7 +909,12 @@ def run_app() -> None:
         source_unit_label = 'page'
         with upload_panel:
             _render_section_header('Upload Script', 'Step 1')
-            uploaded = st.file_uploader('Upload script (.pdf, .md, .markdown)', type=['pdf', 'md', 'markdown'])
+            upload_nonce = int(st.session_state.get('script_upload_nonce', 0))
+            uploaded = st.file_uploader(
+                'Upload script (.pdf, .md, .markdown)',
+                type=['pdf', 'md', 'markdown'],
+                key=f'script_upload_input_{upload_nonce}',
+            )
             unsupported_type = False
             if uploaded:
                 try:
@@ -896,6 +1033,8 @@ def run_app() -> None:
                         'current_scene_intro': '',
                     }
                 )
+                db.save_initial_story_snapshot()
+                _clear_story_runtime_session_state()
 
                 parse_loading.empty()
                 st.success(

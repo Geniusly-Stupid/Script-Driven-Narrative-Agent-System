@@ -30,10 +30,12 @@ def call_nvidia_llm(
     step_name: str = "generation",
     max_retries: int = 3,
     timeout: int | float = 120,
+    allow_env_override: bool = True,
 ) -> str:
     api_key = _load_api_key()
 
-    model = os.getenv("NVIDIA_MODEL", model)
+    if allow_env_override:
+        model = os.getenv("NVIDIA_MODEL", model)
     max_tokens = int(os.getenv("NVIDIA_MAX_TOKENS", "4096"))
     temperature = float(os.getenv("NVIDIA_TEMPERATURE", "0.6"))
     top_p = float(os.getenv("NVIDIA_TOP_P", "0.95"))

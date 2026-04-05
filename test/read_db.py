@@ -182,7 +182,7 @@ def main() -> int:
     memory_rows = [
         dict(row)
         for row in cur.execute(
-            "SELECT id, scene_id, plot_id, user, agent, timestamp FROM memory ORDER BY id DESC LIMIT ?",
+            "SELECT id, scene_id, plot_id, user, agent, visit_id, timestamp FROM memory ORDER BY id DESC LIMIT ?",
             (max(0, args.memory_limit),),
         ).fetchall()
     ]
@@ -198,6 +198,10 @@ def main() -> int:
         plot["mandatory_events"] = _safe_json_loads(plot.get("mandatory_events", "[]") or "[]")
         plot["npc"] = _safe_json_loads(plot.get("npc", "[]") or "[]")
         plot["locations"] = _safe_json_loads(plot.get("locations", "[]") or "[]")
+        plot["navigation"] = _safe_json_loads(plot.get("navigation_json", "{}") or "{}")
+
+    for scene in scene_rows:
+        scene["navigation"] = _safe_json_loads(scene.get("navigation_json", "{}") or "{}")
 
     plot_map = defaultdict(list)
     for plot in plot_rows:
@@ -226,6 +230,7 @@ def main() -> int:
     if state:
         state_data = dict(state)
         state_data["player_profile"] = _safe_json_loads(state_data.get("player_profile", "{}") or "{}")
+        state_data["navigation_state"] = _safe_json_loads(state_data.get("navigation_state_json", "{}") or "{}")
         state_data["current_scene_intro"] = _display_text(state_data.get("current_scene_intro", ""), args.full_text)
         emit(state_data)
     else:
@@ -248,6 +253,8 @@ def main() -> int:
                 "scene_description": _display_text(scene.get("scene_description", ""), args.full_text),
                 "scene_summary": _display_text(scene.get("scene_summary", ""), args.full_text),
                 "status": scene.get("status", ""),
+                "node_kind": scene.get("node_kind", ""),
+                "navigation": scene.get("navigation", {}),
                 "plot_count": len(scene_plots),
             }
         )
@@ -268,6 +275,8 @@ def main() -> int:
                     "raw_text": _display_text(plot.get("raw_text", ""), args.full_text),
                     "status": plot.get("status", ""),
                     "progress": plot.get("progress", 0.0),
+                    "node_kind": plot.get("node_kind", ""),
+                    "navigation": plot.get("navigation", {}),
                 }
             )
 
@@ -326,6 +335,7 @@ def main() -> int:
                 "plot_id": memory.get("plot_id", ""),
                 "user": _display_text(memory.get("user", ""), args.full_text),
                 "agent": _display_text(memory.get("agent", ""), args.full_text),
+                "visit_id": memory.get("visit_id", ""),
                 "timestamp": memory.get("timestamp", ""),
             }
         )

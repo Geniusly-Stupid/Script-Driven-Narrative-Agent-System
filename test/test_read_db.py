@@ -31,7 +31,26 @@ def main() -> int:
                     "scene_summary": "Scene one summary.",
                     "source_page_start": 10,
                     "source_page_end": 14,
-                    "status": "pending",
+                    "status": "in_progress",
+                    "node_kind": "hub",
+                    "navigation": {
+                        "allowed_targets": [
+                            {
+                                "target_kind": "plot",
+                                "target_id": "scene_1_plot_2",
+                                "label": "Second beat",
+                                "required": True,
+                                "role": "branch",
+                                "prerequisites": [],
+                                "goal": "Second beat",
+                                "excerpt": "Line 13\\nLine 14",
+                            }
+                        ],
+                        "return_target": None,
+                        "completion_policy": "all_required_then_advance",
+                        "prerequisites": [],
+                        "close_unselected_on_advance": False,
+                    },
                     "plots": [
                         {
                             "plot_id": "scene_1_plot_1",
@@ -42,8 +61,27 @@ def main() -> int:
                             "raw_text": "Line 10\nLine 11\nLine 12",
                             "source_page_start": 10,
                             "source_page_end": 12,
-                            "status": "pending",
+                            "status": "in_progress",
                             "progress": 0.0,
+                            "node_kind": "hub",
+                            "navigation": {
+                                "allowed_targets": [
+                                    {
+                                        "target_kind": "plot",
+                                        "target_id": "scene_1_plot_2",
+                                        "label": "Second beat",
+                                        "required": True,
+                                        "role": "branch",
+                                        "prerequisites": [],
+                                        "goal": "Second beat",
+                                        "excerpt": "Line 13\\nLine 14",
+                                    }
+                                ],
+                                "return_target": None,
+                                "completion_policy": "all_required_then_advance",
+                                "prerequisites": [],
+                                "close_unselected_on_advance": False,
+                            },
                         },
                         {
                             "plot_id": "scene_1_plot_2",
@@ -54,12 +92,43 @@ def main() -> int:
                             "raw_text": "Line 13\nLine 14",
                             "source_page_start": 13,
                             "source_page_end": 14,
-                            "status": "pending",
-                            "progress": 0.0,
+                            "status": "skipped",
+                            "progress": 1.0,
+                            "node_kind": "branch",
+                            "navigation": {
+                                "allowed_targets": [],
+                                "return_target": {
+                                    "target_kind": "plot",
+                                    "target_id": "scene_1_plot_1",
+                                    "label": "First beat",
+                                    "required": False,
+                                    "role": "return",
+                                    "prerequisites": [],
+                                    "goal": "First beat",
+                                    "excerpt": "Line 10\\nLine 11\\nLine 12",
+                                },
+                                "completion_policy": "terminal_on_resolve",
+                                "prerequisites": [],
+                                "close_unselected_on_advance": False,
+                            },
                         },
                     ],
                 }
             ]
+        )
+        db.append_memory("scene_1", "scene_1_plot_1", "hello", "world", visit_id=3)
+        db.update_system_state(
+            {
+                "current_scene_id": "scene_1",
+                "current_plot_id": "scene_1_plot_1",
+                "navigation_state": {
+                    "visited_scene_ids": ["scene_1"],
+                    "visited_plot_ids": ["scene_1_plot_1"],
+                    "hub_progress": {"scene_1_plot_1": {"progress": 1.0, "completion_policy": "all_required_then_advance"}},
+                    "return_stack": [{"target_kind": "plot", "target_id": "scene_1_plot_1", "visit_id": 3}],
+                },
+                "current_visit_id": 3,
+            }
         )
         db.save_summary(
             "parse_source_meta",
@@ -87,6 +156,11 @@ def main() -> int:
         assert "compression_meta" not in dump_text, "compression_meta should not be shown anymore"
         assert '"issues": []' in dump_text, "healthy sample should have no audit issues"
         assert "line_count" in dump_text, "line counts should be shown"
+        assert "node_kind" in dump_text, "node_kind should be shown"
+        assert "navigation" in dump_text, "navigation should be shown"
+        assert "visit_id" in dump_text, "memory visit_id should be shown"
+        assert "return_stack" in dump_text, "system navigation state should be shown"
+        assert "skipped" in dump_text, "skipped status should be visible in dump"
 
         print("[test_read_db] result: PASS")
         return 0

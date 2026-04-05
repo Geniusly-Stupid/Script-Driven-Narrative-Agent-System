@@ -9,18 +9,28 @@ import app.agent_graph as agent_graph_module
 import app.state as state_module
 from app.agent_graph import NarrativeAgent
 from app.database import Database
-from app.vector_store import ChromaStore
 
 
-def _build_agent(db_name: str, chroma_name: str) -> tuple[NarrativeAgent, Database, ChromaStore]:
+class DummyVectorStore:
+    def search(self, query: str, k: int = 3) -> list[dict]:
+        return []
+
+
+def _extract_player_input(prompt: str) -> str:
+    marker = 'Player Input:\n'
+    if marker not in prompt:
+        return ''
+    tail = prompt.split(marker, 1)[1]
+    return tail.split('\n\n', 1)[0].strip().lower()
+
+
+def _build_agent(db_name: str, chroma_name: str) -> tuple[NarrativeAgent, Database, DummyVectorStore]:
     db_path = ROOT / 'test' / db_name
-    chroma_path = ROOT / 'test' / chroma_name
     if db_path.exists():
         db_path.unlink()
 
     db = Database(str(db_path))
-    store = ChromaStore(path=str(chroma_path))
-    store.reset()
+    store = DummyVectorStore()
 
     scenes = [
         {
@@ -73,7 +83,7 @@ def main() -> int:
     try:
         def fake_agent_llm(prompt: str, model=None, *, step_name: str = 'generation', max_retries: int = 3, timeout: int | float = 120) -> str:
             if step_name == 'check_whether_roll_dice':
-                if 'search the archive shelves' in prompt.lower():
+                if _extract_player_input(prompt) == 'i search the archive shelves for hidden marks.':
                     return '{"need_check": true, "skill": "Spot Hidden", "reason": "Spot Hidden check", "dice_type": "1d100"}'
                 return '{"need_check": false, "skill": "", "reason": "", "dice_type": ""}'
             if step_name == 'generate_response':

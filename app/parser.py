@@ -11,6 +11,7 @@ from typing import Any, Callable
 from pypdf import PdfReader
 
 from app.llm_client import call_nvidia_llm
+from app.navigation import default_navigation, ensure_scene_navigation_defaults, make_target
 
 KNOWLEDGE_TYPES = {
     "setting",
@@ -40,6 +41,14 @@ MARKDOWN_AUXILIARY_PLOT_MARKERS = (
     "appendix",
 )
 SCENE_TRANSITION_TITLE_MARKERS = {"transition", "conclusion", "epilogue", "aftermath"}
+PLOT_OPTION_TITLE_PREFIXES = ("about ", "asking about ", "if ", "exploring ", "ignoring ", "meeting ", "the investigator ")
+
+
+def _truncate_text(text: str, limit: int = 500) -> str:
+    normalized = (text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[: limit - 3].rstrip()}..."
 
 
 @dataclass(frozen=True)
@@ -365,6 +374,8 @@ def parse_script_bundle(
                 warnings=warnings,
             )
 
+    scenes = _attach_navigation_metadata(scenes, document, llm, warnings)
+
     return {
         "scenes": scenes,
         "knowledge": knowledge_entries,
@@ -637,6 +648,377 @@ def _extract_markdown_story_scenes(
 
     _validate_scene_plot_coverage(scenes, story_start, story_end)
     return scenes
+
+
+def _attach_navigation_metadata(
+    scenes: list[dict[str, Any]],
+    document: SourceDocument,
+    llm: Callable[[str], str],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    if not scenes:
+        return scenes
+
+    ensure_scene_navigation_defaults(scenes)
+    if document.source_type != "markdown":
+        return scenes
+
+    _attach_markdown_scene_navigation(scenes)
+    for scene in scenes:
+        _attach_markdown_plot_navigation(scene, scenes)
+    ensure_scene_navigation_defaults(scenes)
+    return scenes
+
+
+def _attach_markdown_scene_navigation(scenes: list[dict[str, Any]]) -> None:
+    anchor_indexes: list[int] = []
+    scene_titles = [_scene_heading_title(scene) for scene in scenes]
+
+    for idx, scene in enumerate(scenes):
+        normalized = scene_titles[idx]
+        if normalized in {"start", "next steps", "conclusion"}:
+            anchor_indexes.append(idx)
+            if normalized == "conclusion":
+                scene["node_kind"] = "terminal"
+                scene["navigation"] = default_navigation(completion_policy="terminal_on_resolve")
+
+    if not anchor_indexes:
+        return
+
+    for anchor_pos, scene_idx in enumerate(anchor_indexes):
+        scene = scenes[scene_idx]
+        title = scene_titles[scene_idx]
+        if title == "conclusion":
+            continue
+
+        next_anchor_idx = anchor_indexes[anchor_pos + 1] if anchor_pos + 1 < len(anchor_indexes) else len(scenes)
+        child_indexes = list(range(scene_idx + 1, next_anchor_idx))
+        child_scenes = [scenes[idx] for idx in child_indexes]
+        child_titles = [scene_titles[idx] for idx in child_indexes]
+        if not child_scenes:
+            continue
+
+        completion_policy = "all_required_then_advance" if title == "start" else "optional_until_exit"
+        scene["node_kind"] = "hub"
+        scene["navigation"] = default_navigation(completion_policy=completion_policy)
+        scene["navigation"]["allowed_targets"] = [
+            make_target(
+                "scene",
+                str(child_scene.get("scene_id", "")),
+                label=child_title or str(child_scene.get("scene_goal", "")),
+                required=title == "start",
+                role="branch",
+                goal=str(child_scene.get("scene_goal", "")),
+                excerpt=_truncate_text(_scene_raw_text(child_scene), 500),
+            )
+            for child_scene, child_title in zip(child_scenes, child_titles, strict=True)
+        ]
+
+        if title in {"start", "next steps"} and next_anchor_idx < len(scenes):
+            downstream_scene = scenes[next_anchor_idx]
+            scene["navigation"]["allowed_targets"].append(
+                make_target(
+                    "scene",
+                    str(downstream_scene.get("scene_id", "")),
+                    label=scene_titles[next_anchor_idx] or str(downstream_scene.get("scene_goal", "")),
+                    role="exit",
+                    prerequisites=[str(child_scene.get("scene_id", "")) for child_scene in child_scenes] if title == "start" else [],
+                    goal=str(downstream_scene.get("scene_goal", "")),
+                    excerpt=_truncate_text(_scene_raw_text(downstream_scene), 500),
+                )
+            )
+
+        for child_scene in child_scenes:
+            if str(child_scene.get("node_kind", "")) not in {"hub", "terminal"}:
+                child_scene["node_kind"] = "branch"
+            child_navigation = default_navigation(
+                completion_policy="optional_until_exit" if title == "next steps" else "terminal_on_resolve"
+            )
+            child_navigation["return_target"] = make_target(
+                "scene",
+                str(scene.get("scene_id", "")),
+                label=title or str(scene.get("scene_goal", "")),
+                role="return",
+                goal=str(scene.get("scene_goal", "")),
+                excerpt=_truncate_text(_scene_raw_text(scene), 500),
+            )
+            if title == "next steps" and next_anchor_idx < len(scenes):
+                downstream_scene = scenes[next_anchor_idx]
+                child_navigation["allowed_targets"] = [
+                    make_target(
+                        "scene",
+                        str(downstream_scene.get("scene_id", "")),
+                        label=scene_titles[next_anchor_idx] or str(downstream_scene.get("scene_goal", "")),
+                        role="exit",
+                        goal=str(downstream_scene.get("scene_goal", "")),
+                        excerpt=_truncate_text(_scene_raw_text(downstream_scene), 500),
+                    )
+                ]
+            child_scene["navigation"] = child_navigation
+
+
+def _attach_markdown_plot_navigation(scene: dict[str, Any], scenes: list[dict[str, Any]]) -> None:
+    plots = scene.get("plots", [])
+    if not isinstance(plots, list) or not plots:
+        return
+
+    if len(plots) == 1:
+        plots[0]["node_kind"] = scene.get("node_kind", "linear")
+        plots[0]["navigation"] = json.loads(json.dumps(scene.get("navigation", default_navigation())))
+        return
+
+    scene_return_target = _scene_return_target(scene)
+    next_scene_target = _scene_exit_target(scene, scenes)
+    plot_titles = [_plot_heading_title(plot) for plot in plots]
+    branch_flags = [_plot_branch_mode(title) for title in plot_titles]
+
+    optional_topic_scene = all(flag in {"optional", "none"} for flag in branch_flags[1:]) and any(
+        flag == "optional" for flag in branch_flags[1:]
+    )
+    conditional_scene = any(flag in {"conditional", "followup"} for flag in branch_flags[1:])
+
+    if optional_topic_scene:
+        _apply_optional_plot_hub(scene, plots, plot_titles, scene_return_target or next_scene_target)
+        return
+
+    if conditional_scene:
+        _apply_conditional_plot_hub(scene, plots, plot_titles, branch_flags, next_scene_target)
+
+
+def _apply_optional_plot_hub(
+    scene: dict[str, Any],
+    plots: list[dict[str, Any]],
+    plot_titles: list[str],
+    next_scene_target: dict[str, Any] | None,
+) -> None:
+    hub_plot = plots[0]
+    hub_plot["node_kind"] = "hub"
+    hub_plot["navigation"] = default_navigation(completion_policy="optional_until_exit")
+    hub_plot["navigation"]["allowed_targets"] = []
+
+    for plot, title in zip(plots[1:], plot_titles[1:], strict=True):
+        plot["node_kind"] = "branch"
+        plot["navigation"] = default_navigation(completion_policy="terminal_on_resolve")
+        plot["navigation"]["return_target"] = make_target(
+            "plot",
+            str(hub_plot.get("plot_id", "")),
+            label=plot_titles[0] or str(hub_plot.get("plot_goal", "")),
+            role="return",
+            goal=str(hub_plot.get("plot_goal", "")),
+            excerpt=_truncate_text(str(hub_plot.get("raw_text", "")), 500),
+        )
+        hub_plot["navigation"]["allowed_targets"].append(
+            make_target(
+                "plot",
+                str(plot.get("plot_id", "")),
+                label=title or str(plot.get("plot_goal", "")),
+                role="branch",
+                goal=str(plot.get("plot_goal", "")),
+                excerpt=_truncate_text(str(plot.get("raw_text", "")), 500),
+            )
+        )
+
+    if next_scene_target:
+        hub_plot["navigation"]["allowed_targets"].append(next_scene_target)
+
+
+def _apply_conditional_plot_hub(
+    scene: dict[str, Any],
+    plots: list[dict[str, Any]],
+    plot_titles: list[str],
+    branch_flags: list[str],
+    next_scene_target: dict[str, Any] | None,
+) -> None:
+    hub_plot = plots[0]
+    downstream_plot = _conditional_downstream_plot(plots, plot_titles, branch_flags)
+    hub_plot["node_kind"] = "hub"
+    hub_plot["navigation"] = default_navigation(
+        completion_policy="exclusive_choice",
+        close_unselected_on_advance=True,
+    )
+    hub_plot["navigation"]["allowed_targets"] = []
+
+    attached_to_previous: dict[str, str] = {}
+    for idx in range(1, len(plots)):
+        if branch_flags[idx] == "followup":
+            previous_idx = max(1, idx - 1)
+            attached_to_previous[str(plots[idx].get("plot_id", ""))] = str(plots[previous_idx].get("plot_id", ""))
+
+    for idx, plot in enumerate(plots[1:], start=1):
+        plot_id = str(plot.get("plot_id", ""))
+        title = plot_titles[idx]
+        plot["node_kind"] = "branch"
+        plot["navigation"] = default_navigation(completion_policy="optional_until_exit")
+        plot["navigation"]["return_target"] = make_target(
+            "plot",
+            str(hub_plot.get("plot_id", "")),
+            label=plot_titles[0] or str(hub_plot.get("plot_goal", "")),
+            role="return",
+            goal=str(hub_plot.get("plot_goal", "")),
+            excerpt=_truncate_text(str(hub_plot.get("raw_text", "")), 500),
+        )
+
+        if plot_id in attached_to_previous:
+            continue
+
+        if downstream_plot and plot_id != str(downstream_plot.get("plot_id", "")):
+            plot["navigation"]["allowed_targets"] = [
+                make_target(
+                    "plot",
+                    str(downstream_plot.get("plot_id", "")),
+                    label=_plot_heading_title(downstream_plot) or str(downstream_plot.get("plot_goal", "")),
+                    role="exit",
+                    goal=str(downstream_plot.get("plot_goal", "")),
+                    excerpt=_truncate_text(str(downstream_plot.get("raw_text", "")), 500),
+                )
+            ]
+            plot["navigation"]["completion_policy"] = "optional_until_exit"
+        elif next_scene_target:
+            plot["navigation"]["allowed_targets"] = [next_scene_target]
+            plot["navigation"]["completion_policy"] = "optional_until_exit"
+
+        hub_plot["navigation"]["allowed_targets"].append(
+            make_target(
+                "plot",
+                plot_id,
+                label=title or str(plot.get("plot_goal", "")),
+                role="branch",
+                goal=str(plot.get("plot_goal", "")),
+                excerpt=_truncate_text(str(plot.get("raw_text", "")), 500),
+            )
+        )
+
+    for plot in plots[1:]:
+        plot_id = str(plot.get("plot_id", ""))
+        previous_plot_id = attached_to_previous.get(plot_id)
+        if not previous_plot_id:
+            continue
+        previous_plot = next((item for item in plots if str(item.get("plot_id", "")) == previous_plot_id), None)
+        if previous_plot is None:
+            continue
+        previous_plot.setdefault("navigation", default_navigation())
+        previous_plot["navigation"] = previous_plot.get("navigation", default_navigation())
+        previous_plot["navigation"].setdefault("allowed_targets", [])
+        previous_plot["navigation"]["allowed_targets"].append(
+            make_target(
+                "plot",
+                plot_id,
+                label=_plot_heading_title(plot) or str(plot.get("plot_goal", "")),
+                role="exit",
+                goal=str(plot.get("plot_goal", "")),
+                excerpt=_truncate_text(str(plot.get("raw_text", "")), 500),
+            )
+        )
+        if next_scene_target:
+            plot["navigation"]["allowed_targets"] = [next_scene_target]
+            plot["navigation"]["completion_policy"] = "optional_until_exit"
+
+    if downstream_plot:
+        downstream_plot["node_kind"] = "branch"
+        downstream_plot["navigation"] = default_navigation(completion_policy="optional_until_exit")
+        if next_scene_target:
+            downstream_plot["navigation"]["allowed_targets"] = [next_scene_target]
+
+
+def _scene_heading_title(scene: dict[str, Any]) -> str:
+    plots = scene.get("plots", [])
+    if isinstance(plots, list) and plots:
+        raw_title = _extract_heading_title(str(plots[0].get("raw_text", "")))
+        if raw_title:
+            return raw_title
+    return str(scene.get("scene_goal", "")).strip().lower()
+
+
+def _plot_heading_title(plot: dict[str, Any]) -> str:
+    raw_title = _extract_heading_title(str(plot.get("raw_text", "")))
+    if raw_title:
+        return raw_title
+    return str(plot.get("plot_goal", "")).strip().lower()
+
+
+def _extract_heading_title(raw_text: str) -> str:
+    for line in (raw_text or "").splitlines():
+        stripped = line.strip()
+        match = MARKDOWN_HEADING_RE.match(stripped)
+        if match:
+            return _normalize_markdown_heading(match.group(2)).strip().lower()
+        if stripped:
+            break
+    return ""
+
+
+def _scene_raw_text(scene: dict[str, Any]) -> str:
+    plots = scene.get("plots", [])
+    if not isinstance(plots, list):
+        return ""
+    return "\n".join(str(plot.get("raw_text", "")).strip() for plot in plots if str(plot.get("raw_text", "")).strip())
+
+
+def _scene_exit_target(scene: dict[str, Any], scenes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    scene_id = str(scene.get("scene_id", ""))
+    scene_idx = next((idx for idx, item in enumerate(scenes) if str(item.get("scene_id", "")) == scene_id), -1)
+    if scene_idx < 0:
+        return None
+
+    current_navigation = scene.get("navigation", {})
+    exit_target = next(
+        (
+            target
+            for target in current_navigation.get("allowed_targets", [])
+            if target.get("target_kind") == "scene" and target.get("role") == "exit"
+        ),
+        None,
+    )
+    if exit_target:
+        return exit_target
+
+    if scene_idx + 1 >= len(scenes):
+        return None
+    next_scene = scenes[scene_idx + 1]
+    return make_target(
+        "scene",
+        str(next_scene.get("scene_id", "")),
+        label=_scene_heading_title(next_scene) or str(next_scene.get("scene_goal", "")),
+        role="exit",
+        goal=str(next_scene.get("scene_goal", "")),
+        excerpt=_truncate_text(_scene_raw_text(next_scene), 500),
+    )
+
+
+def _scene_return_target(scene: dict[str, Any]) -> dict[str, Any] | None:
+    navigation = scene.get("navigation", {})
+    target = navigation.get("return_target")
+    if isinstance(target, dict) and target.get("target_kind") and target.get("target_id"):
+        return target
+    return None
+
+
+def _plot_branch_mode(title: str) -> str:
+    normalized = (title or "").strip().lower()
+    if not normalized:
+        return "none"
+    if normalized.startswith("about ") or normalized.startswith("asking about "):
+        return "optional"
+    if normalized.startswith("if "):
+        if "manages to" in normalized or "kill or incapacitate" in normalized:
+            return "followup"
+        return "conditional"
+    if normalized.startswith("exploring ") or normalized.startswith("ignoring ") or normalized.startswith("meeting ") or normalized.startswith("the investigator "):
+        return "conditional"
+    return "none"
+
+
+def _conditional_downstream_plot(
+    plots: list[dict[str, Any]],
+    plot_titles: list[str],
+    branch_flags: list[str],
+) -> dict[str, Any] | None:
+    if len(plots) < 3:
+        return None
+    last_title = plot_titles[-1]
+    if branch_flags[-1] == "conditional" and last_title.startswith("meeting "):
+        return plots[-1]
+    return None
 
 
 def _collect_markdown_headings(document: SourceDocument) -> list[MarkdownHeading]:
