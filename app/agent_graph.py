@@ -19,6 +19,7 @@ from app.llm_client import call_nvidia_llm
 from app.rag import categorize_docs, generate_retrieval_queries
 from app.state import (
     classify_player_alignment,
+    extract_turn_state,
     evaluate_plot_completion,
     evaluate_pre_response_transition,
     evaluate_scene_completion,
@@ -52,6 +53,7 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
 - Do not fabricate missing knowledge.
 - Avoid meta commentary.
 - Hidden truth is keeper-only context. Use it for consistency, do not reveal it directly unless current plot already unlocks it.
+- Skipped or unvisited branches did not happen. Do not summarize, reward, or conclude them as if they occurred.
 - Final response language: {output_language}
 - Write the response entirely in {output_language}.
 
@@ -76,15 +78,14 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
 - If the player tries to revisit an exhausted scene or plot, explain in-world that it is unlikely to reveal anything new, then redirect smoothly toward the remaining eligible leads or an available exit.
 - If a branch investigation has stalled and the player clearly gives up, accepts there is nothing more to learn, or decides to leave, treat that as a valid way to wrap the current investigation beat and guide the story back toward the hub or the next eligible lead.
 - If the player drifts away from the active storyline, absorb the action briefly in-world and then steer attention back toward the current plot goal, remaining eligible targets, or an available exit.
-- If Latest Player Alignment is `off_topic_unrelated`, acknowledge the action briefly, then pivot back to the Active Plot Objective and Current Scene Boundary. Do not build a new durable subplot around the irrelevant action.
+- If Latest Player Alignment is `off_topic`, acknowledge the action briefly, then pivot back to the Active Plot Objective and Current Scene Boundary. Do not build a new durable subplot around the irrelevant action.
 - If Redirect State shows repeated drift, keep the acknowledgement minimal and pivot back more firmly.
-- If Latest Player Alignment is `high_confidence_target_choice`, transition smoothly into that legal target in-world and make the bridge feel causally connected to the player's action.
-- If Latest Player Alignment is `explicit_abandon` or `explicit_leave_scene`, naturally close the current beat before bridging to the next legal target.
+- If Latest Player Alignment is `target_choice`, transition smoothly into that legal target in-world and make the bridge feel causally connected to the player's action.
 - If the player clearly commits to the next plot or next scene, transition into that material immediately in this same response instead of re-opening the current setup plot.
 - When such a handoff happens, write the first playable beats of the target plot naturally. Do not repeat a second opening for the current plot.
 - Do NOT narrate the player as already arriving in another scene or plot unless a legal state transition has already been applied for this turn.
 - If the current beat is only being wrapped up and the next location has not been legally entered yet, close the current beat and angle toward the next lead without fully staging the new location.
-- If Latest Agent Turn already presented a clear set of choices and the player answered one of them, execute that choice instead of rephrasing the same choice point again.
+- If Latest Turn State shows an open choice and the player answered one of the offered targets, execute that choice instead of rephrasing the same choice point again.
 - If `Scene Entry Turn` is true and `Player Input` is empty, do NOT invent a fresh explicit menu of options unless `Opening Choice Allowed` is true.
 - If `Opening Choice Allowed` is false, do not end the opening with a parenthetical branch question or a newly invented binary choice.
 - Focus on describing NPC reactions and changes in the scene.
@@ -122,6 +123,10 @@ Requirements:
 - Maintain consistency with Memory.
 - Use Retrieved Knowledge only if relevant.
 - Preserve immersion.
+- If `Input Consumed By Transition` is true, the latest player input has already been used to legally enter the current node. Do not treat it as a second fresh action inside this node.
+- If `Input Consumed By Transition` is true, use `Transition Trigger Input` only as background motivation for why the investigator arrived here.
+- If `Input Consumed By Transition` is true, start inside the current target node and establish its first playable beats before presenting any further branch or exit possibilities.
+- Do not narrate leaving, exhausting, or wrapping a newly entered target node on the same response unless the script excerpt itself resolves immediately on entry.
 - If `Scene Entry Turn` is true and `Player Input` is empty, write this response as the opening narration for the current scene/plot.
 - If `Scene Entry Turn` is true and `Player Input` is not empty, write this response as the first playable continuation of the current scene/plot while still responding to the player's latest action.
 - `Scene Entry Turn` does NOT mean a separate pre-plot phase. The current plot has already started.
@@ -132,6 +137,15 @@ Requirements:
 
 Player Input:
 {user_input}
+
+Input Consumed By Transition:
+{input_consumed_by_transition}
+
+Entry Relationship:
+{entry_relationship}
+
+Transition Trigger Input:
+{transition_trigger_input}
 
 ---
 
@@ -269,6 +283,9 @@ Return Target:
 Latest Agent Turn Excerpt:
 {latest_agent_turn_excerpt}
 
+Latest Turn State:
+{latest_turn_state_summary}
+
 Choice Prompt Active:
 {choice_prompt_active}
 
@@ -393,6 +410,10 @@ class NarrativeState(TypedDict, total=False):
     conversation_history: list[dict[str, Any]]
     retrieved_docs: list[dict[str, Any]]
     latest_user_input: str
+    effective_user_input: str
+    transition_trigger_input: str
+    input_consumed_by_transition: bool
+    entry_relationship: str
     prompt: str
     roll_check_prompt: str
     retrieval_queries: list[str]
@@ -449,6 +470,16 @@ class NarrativeState(TypedDict, total=False):
     latest_alignment_summary: str
     latest_handoff_candidate_summary: str
     latest_agent_turn_excerpt: str
+    latest_turn_state: dict[str, Any]
+    latest_turn_state_summary: str
+    current_turn_state: dict[str, Any]
+    intent_alignment: str
+    intent_action: str
+    intent_target_kind: str
+    intent_target_id: str
+    intent_transition_path: str
+    intent_close_current: bool
+    intent_reason: str
     choice_prompt_active: bool
     opening_choice_allowed: bool
     visited_scene_ids: list[str]
@@ -499,6 +530,7 @@ class NarrativeAgent:
         workflow.add_node('check_whether_roll_dice', self.check_whether_roll_dice)
         workflow.add_node('roll_dice', self.roll_dice)
         workflow.add_node('generate_response', self.generate_response)
+        workflow.add_node('extract_turn_state', self.extract_turn_state)
         workflow.add_node('write_memory', self.write_memory)
         workflow.add_node('check_plot_completion', self.check_plot_completion)
         workflow.add_node('check_scene_completion', self.check_scene_completion)
@@ -520,7 +552,8 @@ class NarrativeAgent:
             },
         )
         workflow.add_edge('roll_dice', 'generate_response')
-        workflow.add_edge('generate_response', 'write_memory')
+        workflow.add_edge('generate_response', 'extract_turn_state')
+        workflow.add_edge('extract_turn_state', 'write_memory')
         workflow.add_edge('write_memory', 'check_plot_completion')
         workflow.add_edge('check_plot_completion', 'check_scene_completion')
         workflow.add_edge('check_scene_completion', 'update_state')
@@ -540,6 +573,10 @@ class NarrativeAgent:
             'output_language': system_state.get('output_language', 'English'),
             'player_profile': self.db.get_player_profile(),
             'latest_user_input': user_input,
+            'effective_user_input': user_input,
+            'transition_trigger_input': '',
+            'input_consumed_by_transition': False,
+            'entry_relationship': 'none',
             'conversation_history': [],
             'retrieved_docs': [],
             'mandatory_events': [],
@@ -583,6 +620,16 @@ class NarrativeAgent:
             'latest_alignment_summary': 'none',
             'latest_handoff_candidate_summary': 'None',
             'latest_agent_turn_excerpt': 'None',
+            'latest_turn_state': {},
+            'latest_turn_state_summary': 'choice_open=false; beat_status=open; offered_targets=None; summary=None',
+            'current_turn_state': {},
+            'intent_alignment': 'none',
+            'intent_action': 'stay',
+            'intent_target_kind': '',
+            'intent_target_id': '',
+            'intent_transition_path': 'stay',
+            'intent_close_current': False,
+            'intent_reason': '',
             'choice_prompt_active': False,
             'opening_choice_allowed': False,
             'visited_scene_ids': [],
@@ -633,6 +680,10 @@ class NarrativeAgent:
             'output_language': system_state.get('output_language', 'English'),
             'player_profile': self.db.get_player_profile(),
             'latest_user_input': '',
+            'effective_user_input': '',
+            'transition_trigger_input': '',
+            'input_consumed_by_transition': False,
+            'entry_relationship': 'none',
             'conversation_history': [],
             'retrieved_docs': [],
             'mandatory_events': [],
@@ -676,6 +727,16 @@ class NarrativeAgent:
             'latest_alignment_summary': 'none',
             'latest_handoff_candidate_summary': 'None',
             'latest_agent_turn_excerpt': 'None',
+            'latest_turn_state': {},
+            'latest_turn_state_summary': 'choice_open=false; beat_status=open; offered_targets=None; summary=None',
+            'current_turn_state': {},
+            'intent_alignment': 'none',
+            'intent_action': 'stay',
+            'intent_target_kind': '',
+            'intent_target_id': '',
+            'intent_transition_path': 'stay',
+            'intent_close_current': False,
+            'intent_reason': '',
             'choice_prompt_active': False,
             'opening_choice_allowed': False,
             'visited_scene_ids': [],
@@ -714,12 +775,14 @@ class NarrativeAgent:
         state = self.generate_retrieval_queries(state)
         state = self.vector_retrieve(state)
         state = self.generate_response(state)
+        state = self.extract_turn_state(state)
         self.db.append_memory(
             state['scene_id'],
             state['plot_id'],
             '',
             state.get('response', ''),
             visit_id=int(state.get('current_visit_id', 0) or 0),
+            turn_state=state.get('current_turn_state'),
         )
         self.latest_debug_prompts = state.get('debug_prompts', [])
         return state
@@ -734,7 +797,14 @@ class NarrativeAgent:
         if self.db.has_scene_opening(scene_id, KP_OPENING_MARKER, visit_id=visit_id):
             return None
         opening = self._generate_scene_opening(scene_id, plot_id)
-        self.db.append_memory(scene_id, plot_id, KP_OPENING_MARKER, opening, visit_id=visit_id)
+        self.db.append_memory(
+            scene_id,
+            plot_id,
+            KP_OPENING_MARKER,
+            opening,
+            visit_id=visit_id,
+            turn_state={},
+        )
         return opening
 
     def set_debug_mode(self, enabled: bool) -> None:
@@ -1029,7 +1099,7 @@ class NarrativeAgent:
 
         current_plot_skills = self._extract_requested_skills(str(state.get('current_plot_raw_text', '') or ''), state)
         unique_plot_skills = [skill for skill in current_plot_skills if skill]
-        if len(unique_plot_skills) == 1 and state.get('latest_alignment') != 'off_topic_unrelated':
+        if len(unique_plot_skills) == 1 and state.get('latest_alignment') != 'off_topic':
             preferred = unique_plot_skills[0]
             return {
                 'need_check': True,
@@ -1074,6 +1144,36 @@ class NarrativeAgent:
     def build_prompt(self, state: NarrativeState) -> NarrativeState:
         return state
 
+    def _transition_targets_current_node(self, state: NarrativeState) -> bool:
+        latest_transition = state.get('latest_transition') or {}
+        if not isinstance(latest_transition, dict):
+            return False
+        target_scene_id = str(latest_transition.get('target_scene_id', '') or '')
+        target_plot_id = str(latest_transition.get('target_plot_id', '') or '')
+        if target_scene_id != str(state.get('scene_id', '') or ''):
+            return False
+        if target_plot_id and target_plot_id != str(state.get('plot_id', '') or ''):
+            return False
+        return True
+
+    def _derive_entry_input_state(self, state: NarrativeState) -> None:
+        latest_transition = state.get('latest_transition') or {}
+        relationship = ''
+        if isinstance(latest_transition, dict):
+            relationship = str(latest_transition.get('relationship', '') or '')
+        scene_entry_turn = bool(state.get('scene_entry_turn', False))
+        transition_targets_current = self._transition_targets_current_node(state)
+        consumed = bool(
+            state.get('pre_response_transition_applied')
+            and scene_entry_turn
+            and transition_targets_current
+            and relationship.startswith('pre_response_')
+        )
+        state['input_consumed_by_transition'] = consumed
+        state['entry_relationship'] = relationship if scene_entry_turn and transition_targets_current and relationship else ('scene_opening' if scene_entry_turn else 'none')
+        state['transition_trigger_input'] = state.get('latest_user_input', '') if consumed else ''
+        state['effective_user_input'] = '' if consumed else state.get('latest_user_input', '')
+
     def retrieve_memory(self, state: NarrativeState) -> NarrativeState:
         visit_id = int(state.get('current_visit_id', 0) or 0)
         state['conversation_history'] = self.db.get_recent_turns(
@@ -1098,6 +1198,8 @@ class NarrativeAgent:
         state['plot_exit_conditions_summary'] = hints.get('plot_exit_conditions_summary', 'None')
         state['current_scene_boundary_summary'] = hints.get('current_scene_boundary_summary', 'None')
         state['latest_agent_turn_excerpt'] = hints.get('latest_agent_turn_excerpt', 'None')
+        state['latest_turn_state'] = hints.get('latest_turn_state', {})
+        state['latest_turn_state_summary'] = hints.get('latest_turn_state_summary', 'choice_open=false; beat_status=open; offered_targets=None; summary=None')
         state['choice_prompt_active'] = bool(hints.get('choice_prompt_active', False))
         state['opening_choice_allowed'] = bool(hints.get('opening_choice_allowed', False))
         state['allowed_targets'] = hints.get('allowed_targets', [])
@@ -1137,6 +1239,7 @@ class NarrativeAgent:
         state['next_scene_plot_excerpt'] = hints.get('next_scene_plot_excerpt', '')
         state['plot_progress'] = float(hints.get('plot_progress', state.get('plot_progress', 0.0)))
         state['scene_progress'] = float(hints.get('scene_progress', state.get('scene_progress', 0.0)))
+        state['current_turn_state'] = {}
         if scene:
             state['scene_goal'] = scene.get('scene_goal', '')
             state['scene_description'] = scene.get('scene_description', '')
@@ -1153,7 +1256,8 @@ class NarrativeAgent:
                         state['previous_plot_summary'] = ''
                     break
             state['scene_entry_turn'] = not bool(state.get('conversation_history'))
-        if (state.get('latest_user_input') or '').strip():
+        self._derive_entry_input_state(state)
+        if (state.get('latest_user_input') or '').strip() and not state.get('pre_response_transition_applied'):
             alignment = classify_player_alignment(
                 state.get('latest_user_input', ''),
                 plot_goal=state.get('plot_goal', ''),
@@ -1163,10 +1267,24 @@ class NarrativeAgent:
                 mandatory_events=state.get('mandatory_events', []),
                 allowed_targets=state.get('allowed_targets', []),
                 indirect_targets_via_return=state.get('indirect_targets_via_return', []),
+                remaining_required_targets=state.get('remaining_required_targets', []),
+                redirect_streak=int(state.get('redirect_streak', 0) or 0),
+                latest_agent_turn_excerpt=state.get('latest_agent_turn_excerpt', ''),
+                latest_turn_state=state.get('latest_turn_state', {}),
+                choice_prompt_active=bool(state.get('choice_prompt_active', False)),
+                current_node_kind=state.get('current_node_kind', 'linear'),
+                conversation_history=state.get('conversation_history', []),
             )
-            state['latest_alignment'] = str(alignment.get('alignment', 'none'))
-            state['latest_alignment_summary'] = str(alignment.get('summary', 'none'))
             candidate = alignment.get('candidate_target')
+            state['intent_alignment'] = str(alignment.get('alignment', 'current_plot'))
+            state['intent_action'] = str(alignment.get('action', 'stay'))
+            state['intent_target_kind'] = str(alignment.get('target_kind', ''))
+            state['intent_target_id'] = str(alignment.get('target_id', ''))
+            state['intent_transition_path'] = str(alignment.get('transition_path', 'stay'))
+            state['intent_close_current'] = bool(alignment.get('close_current', False))
+            state['intent_reason'] = str(alignment.get('reason', ''))
+            state['latest_alignment'] = state['intent_alignment']
+            state['latest_alignment_summary'] = str(alignment.get('summary', 'none'))
             if candidate:
                 state['latest_handoff_candidate_summary'] = self._target_descriptor(
                     str(candidate.get('target_kind', '')),
@@ -1174,10 +1292,22 @@ class NarrativeAgent:
                 )
             else:
                 state['latest_handoff_candidate_summary'] = 'None'
-        else:
+        elif not (state.get('latest_user_input') or '').strip():
+            state['intent_alignment'] = 'none'
+            state['intent_action'] = 'stay'
+            state['intent_target_kind'] = ''
+            state['intent_target_id'] = ''
+            state['intent_transition_path'] = 'stay'
+            state['intent_close_current'] = False
+            state['intent_reason'] = ''
             state['latest_alignment'] = 'none'
             state['latest_alignment_summary'] = 'none'
             state['latest_handoff_candidate_summary'] = 'None'
+        else:
+            state['latest_alignment'] = state.get('intent_alignment', state.get('latest_alignment', 'none'))
+            state['latest_alignment_summary'] = state.get('latest_alignment_summary', 'none')
+            if not state.get('latest_handoff_candidate_summary'):
+                state['latest_handoff_candidate_summary'] = 'None'
         return state
 
     def pre_response_transition(self, state: NarrativeState) -> NarrativeState:
@@ -1198,6 +1328,7 @@ class NarrativeAgent:
             mandatory_events=state.get('mandatory_events', []),
             redirect_streak=int(state.get('redirect_streak', 0) or 0),
             latest_agent_turn_excerpt=state.get('latest_agent_turn_excerpt', ''),
+            latest_turn_state=state.get('latest_turn_state', {}),
             choice_prompt_active=bool(state.get('choice_prompt_active', False)),
             conversation_history=state.get('conversation_history', []),
             prompt_recorder=lambda prompt: self._record_prompt(state, 'pre_response_transition_prompt', prompt),
@@ -1214,6 +1345,12 @@ class NarrativeAgent:
         state['pre_response_transition_path'] = transition_path
         state['pre_response_transition_close_current'] = close_current
         state['pre_response_transition_reason'] = reason
+        state['intent_action'] = action
+        state['intent_target_kind'] = target_kind
+        state['intent_target_id'] = target_id
+        state['intent_transition_path'] = transition_path
+        state['intent_close_current'] = close_current
+        state['intent_reason'] = reason
 
         if action != 'target':
             return state
@@ -1341,7 +1478,7 @@ class NarrativeAgent:
 
     def generate_retrieval_queries(self, state: NarrativeState) -> NarrativeState:
         state['retrieval_queries'] = generate_retrieval_queries(
-            state['latest_user_input'],
+            state.get('effective_user_input', state.get('latest_user_input', '')),
             state.get('plot_goal', ''),
             state.get('mandatory_events', []),
             state.get('conversation_history', []),
@@ -1360,7 +1497,7 @@ class NarrativeAgent:
         player_skill_list = self._format_player_skill_list(state)
         recent_conversation = self._format_recent_conversation(state, rounds=3)
         state['roll_check_prompt'] = ROLL_CHECK_PROMPT_TEMPLATE.format(
-            user_input=state['latest_user_input'],
+            user_input=state.get('effective_user_input', state.get('latest_user_input', '')),
             scene_id=state.get('scene_id', ''),
             plot_id=state.get('plot_id', ''),
             current_scene_goal=state.get('scene_goal', '') or 'None',
@@ -1448,7 +1585,10 @@ class NarrativeAgent:
                 narrative_perspective='Second person',
                 response_length='Concise',
                 output_language=self._get_output_language(state),
-                user_input=state['latest_user_input'],
+                user_input=state.get('effective_user_input', state.get('latest_user_input', '')),
+                input_consumed_by_transition=str(bool(state.get('input_consumed_by_transition', False))).lower(),
+                entry_relationship=state.get('entry_relationship', 'none'),
+                transition_trigger_input=state.get('transition_trigger_input', '') or 'None',
                 scene_id=state.get('scene_id', ''),
                 plot_id=state.get('plot_id', ''),
                 current_scene_goal=state.get('scene_goal', '') or 'None',
@@ -1490,6 +1630,7 @@ class NarrativeAgent:
                 remaining_required_targets_summary=state.get('remaining_required_targets_summary', 'None'),
                 return_target_summary=state.get('return_target_summary', 'None'),
                 latest_agent_turn_excerpt=state.get('latest_agent_turn_excerpt', 'None'),
+                latest_turn_state_summary=state.get('latest_turn_state_summary', 'choice_open=false; beat_status=open; offered_targets=None; summary=None'),
                 choice_prompt_active=str(bool(state.get('choice_prompt_active', False))).lower(),
                 opening_choice_allowed=str(bool(state.get('opening_choice_allowed', False))).lower(),
                 visited_scene_ids_summary=self._list_summary(state.get('visited_scene_ids', [])),
@@ -1502,13 +1643,23 @@ class NarrativeAgent:
             state['response'] = self._llm_call(state['prompt'], step_name='generate_response')
             if state.get('resolved_check_summary'):
                 state['response'] = self._trim_redundant_check_request(state.get('response', ''))
-            if state.get('scene_entry_turn') and not (state.get('latest_user_input') or '').strip() and not bool(state.get('opening_choice_allowed', False)):
+            if state.get('scene_entry_turn') and not (state.get('effective_user_input', state.get('latest_user_input', '')) or '').strip() and not bool(state.get('opening_choice_allowed', False)):
                 state['response'] = self._trim_disallowed_opening_choice(state.get('response', ''))
         except Exception as e:
             logger.error("LLM error in generate_response prompt_length=%s error=%s", len(state.get('prompt', '')), e)
             print("LLM error:", e)
             traceback.print_exc()
             state['response'] = self._fallback_response(state)
+        return state
+
+    def extract_turn_state(self, state: NarrativeState) -> NarrativeState:
+        state['current_turn_state'] = extract_turn_state(
+            state.get('response', ''),
+            current_node_kind=state.get('current_node_kind', 'linear'),
+            allowed_targets=state.get('allowed_targets', []),
+            indirect_targets_via_return=state.get('indirect_targets_via_return', []),
+            prompt_recorder=lambda prompt: self._record_prompt(state, 'turn_state_prompt', prompt),
+        )
         return state
 
     def write_memory(self, state: NarrativeState) -> NarrativeState:
@@ -1518,6 +1669,7 @@ class NarrativeAgent:
             state['latest_user_input'],
             state['response'],
             visit_id=int(state.get('current_visit_id', 0) or 0),
+            turn_state=state.get('current_turn_state'),
         )
         return state
 
@@ -1539,6 +1691,7 @@ class NarrativeAgent:
             remaining_required_targets=state.get('remaining_required_targets', []),
             redirect_streak=int(state.get('redirect_streak', 0) or 0),
             latest_agent_turn_excerpt=state.get('latest_agent_turn_excerpt', ''),
+            latest_turn_state=state.get('current_turn_state') or state.get('latest_turn_state', {}),
             choice_prompt_active=bool(state.get('choice_prompt_active', False)),
             conversation_history=state.get('conversation_history', []),
             prompt_recorder=lambda prompt: self._record_prompt(state, 'plot_completion_prompt', prompt),
@@ -1558,7 +1711,7 @@ class NarrativeAgent:
             state.get('navigation_state'),
             plot_id=state.get('plot_id', ''),
             visit_id=int(state.get('current_visit_id', 0) or 0),
-            alignment=state.get('latest_alignment', 'none'),
+            alignment=state.get('intent_alignment', state.get('latest_alignment', 'none')),
             handoff_candidate=next(
                 (
                     target
@@ -1795,7 +1948,9 @@ class NarrativeAgent:
 
     def _fallback_response(self, state: NarrativeState) -> str:
         output_language = self._get_output_language(state)
-        user_input = state['latest_user_input']
+        user_input = state.get('effective_user_input', state.get('latest_user_input', ''))
+        if not user_input and state.get('input_consumed_by_transition'):
+            user_input = state.get('transition_trigger_input', '')
         dice_hint = re.search(r'(\d*d\d+)', user_input.lower())
         if dice_hint:
             rolled = self._roll_dice_expr(dice_hint.group(1))
@@ -1984,12 +2139,25 @@ Recent History:
             bullets.append(f"- Plot excerpt / options context: {plot_excerpt}")
         return '\n'.join(bullets)
 
+    def _first_summary_fact(self, text: str) -> str:
+        for line in str(text or '').splitlines():
+            cleaned = line.strip().lstrip('-').strip()
+            if cleaned:
+                return cleaned
+        return ''
+
     def _build_scene_summary(self, scene_id: str, state: NarrativeState | None = None) -> str:
         scene = self.db.get_scene(scene_id) or {}
         plots = scene.get('plots', [])
         plot_lines = '\n'.join(
             [
                 f"- {p.get('plot_id')}: goal={p.get('plot_goal', '')}, progress={p.get('progress', 0)}, status={p.get('status', '')}"
+                for p in plots
+            ]
+        )
+        plot_summary_lines = '\n'.join(
+            [
+                f"- {p.get('plot_id')}: status={p.get('status', '')}; summary={self.db.get_summary('plot', scene_id=scene_id, plot_id=str(p.get('plot_id', ''))) or 'None'}"
                 for p in plots
             ]
         )
@@ -2001,12 +2169,20 @@ Include:
 - gained information
 - narrative turning point
 
+Rules:
+- Treat skipped plots as unchosen. They did not happen.
+- Use completed plot summaries as the source of truth for what actually occurred.
+- Do not infer hidden revelations from skipped or unvisited plots.
+
 Scene: {scene_id}
 Scene Goal: {scene.get('scene_goal', '')}
 Scene Node Kind: {scene.get('node_kind', 'linear')}
 Scene Completion Reason: {(state or {}).get('scene_completion_reason', '') or 'None'}
 Plots:
 {plot_lines}
+
+Completed / Skipped Plot Summaries:
+{plot_summary_lines}
 """
         self._record_prompt(state, 'scene_summary_prompt', prompt)
         try:

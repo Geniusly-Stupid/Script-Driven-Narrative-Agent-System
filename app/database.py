@@ -58,6 +58,7 @@ class Database:
                 plot_id TEXT NOT NULL,
                 user TEXT NOT NULL,
                 agent TEXT NOT NULL,
+                turn_state_json TEXT NOT NULL DEFAULT '{}',
                 visit_id INTEGER NOT NULL DEFAULT 0,
                 timestamp TEXT NOT NULL
             );
@@ -119,7 +120,6 @@ class Database:
                 '''
             )
             self.conn.commit()
-
     def _migrate_schema(self) -> None:
         self._ensure_column('scenes', "scene_description TEXT NOT NULL DEFAULT ''")
         self._ensure_column('scenes', "node_kind TEXT NOT NULL DEFAULT 'linear'")
@@ -132,6 +132,7 @@ class Database:
         self._ensure_column('plots', 'source_page_end INTEGER NOT NULL DEFAULT 1')
         self._ensure_column('plots', "raw_text TEXT NOT NULL DEFAULT ''")
         self._ensure_column('memory', 'visit_id INTEGER NOT NULL DEFAULT 0')
+        self._ensure_column('memory', "turn_state_json TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column('system_state', "output_language TEXT NOT NULL DEFAULT 'English'")
         self._ensure_column('system_state', "navigation_state_json TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column('system_state', 'current_visit_id INTEGER NOT NULL DEFAULT 0')
@@ -395,10 +396,27 @@ class Database:
             self.conn.execute(f'UPDATE scenes SET {key} = ? WHERE scene_id = ?', (value, scene_id))
         self.conn.commit()
 
-    def append_memory(self, scene_id: str, plot_id: str, user: str, agent: str, visit_id: int = 0) -> None:
+    def append_memory(
+        self,
+        scene_id: str,
+        plot_id: str,
+        user: str,
+        agent: str,
+        visit_id: int = 0,
+        *,
+        turn_state: dict[str, Any] | None = None,
+    ) -> None:
         self.conn.execute(
-            'INSERT INTO memory(scene_id, plot_id, user, agent, visit_id, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-            (scene_id, plot_id, user, agent, int(visit_id), datetime.utcnow().isoformat()),
+            'INSERT INTO memory(scene_id, plot_id, user, agent, turn_state_json, visit_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            (
+                scene_id,
+                plot_id,
+                user,
+                agent,
+                json.dumps(turn_state or {}, ensure_ascii=False),
+                int(visit_id),
+                datetime.utcnow().isoformat(),
+            ),
         )
         self.conn.commit()
 
@@ -412,15 +430,20 @@ class Database:
     ) -> list[dict[str, Any]]:
         if visit_id is None:
             rows = self.conn.execute(
-                'SELECT user, agent, timestamp, visit_id FROM memory WHERE scene_id = ? AND plot_id = ? ORDER BY id DESC LIMIT ?',
+                'SELECT user, agent, turn_state_json, timestamp, visit_id FROM memory WHERE scene_id = ? AND plot_id = ? ORDER BY id DESC LIMIT ?',
                 (scene_id, plot_id, limit),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                'SELECT user, agent, timestamp, visit_id FROM memory WHERE scene_id = ? AND plot_id = ? AND visit_id = ? ORDER BY id DESC LIMIT ?',
+                'SELECT user, agent, turn_state_json, timestamp, visit_id FROM memory WHERE scene_id = ? AND plot_id = ? AND visit_id = ? ORDER BY id DESC LIMIT ?',
                 (scene_id, plot_id, int(visit_id), limit),
             ).fetchall()
-        return [dict(r) for r in reversed(rows)]
+        hydrated_rows: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            record = dict(row)
+            record['turn_state'] = parse_json_object(record.get('turn_state_json', '{}'))
+            hydrated_rows.append(record)
+        return hydrated_rows
 
     def has_scene_opening(self, scene_id: str, marker: str, visit_id: int | None = None) -> bool:
         if visit_id is None:
