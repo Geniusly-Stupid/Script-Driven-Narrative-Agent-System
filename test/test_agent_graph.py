@@ -20,6 +20,10 @@ class DummyVectorStore:
 def _agent_llm(prompt: str, *args, **kwargs):
     step_name = kwargs.get('step_name', '')
     if step_name == 'check_whether_roll_dice':
+        if 'ROLL_TRIGGER_TEST' in prompt:
+            return '{"need_check": true, "skill": "Spot Hidden", "reason": "llm_requests_check", "dice_type": "1d100"}'
+        if 'ROLL_INVALID_TEST' in prompt:
+            return 'not-json'
         return '{"need_check": false, "skill": "", "reason": "", "dice_type": ""}'
     if step_name == 'player_alignment_classification':
         if 'Latest Player Input:\nI go to the library.' in prompt:
@@ -239,6 +243,44 @@ def main() -> int:
         assert wrapped_state['current_visit_id'] == 2
         assert library_turns[-1]['turn_state']['beat_status'] == 'wrapped'
         assert wrapped.get('scene_id') == 'scene_start'
+
+        print('[test_agent_graph] case 5: roll checks should trigger only from llm output')
+        roll_state = {
+            'roll_check_prompt': 'ROLL_TRIGGER_TEST',
+            'need_check': False,
+            'check_skill': '',
+            'check_reason': '',
+            'dice_type': '',
+            'dice_result': None,
+            'skill_check_result': None,
+            'resolved_check_summary': '',
+        }
+        roll_state = agent.check_whether_roll_dice(roll_state)
+        assert roll_state.get('need_check') is True
+        assert roll_state.get('check_skill') == 'Spot Hidden'
+        assert roll_state.get('check_reason') == 'llm_requests_check'
+        assert roll_state.get('dice_type') == '1d100'
+
+        print('[test_agent_graph] case 6: invalid roll-check json should conservatively avoid marker fallback')
+        invalid_roll_state = {
+            'roll_check_prompt': 'ROLL_INVALID_TEST',
+            'need_check': False,
+            'check_skill': '',
+            'check_reason': '',
+            'dice_type': '',
+            'dice_result': None,
+            'skill_check_result': None,
+            'resolved_check_summary': '',
+            'latest_agent_turn_excerpt': 'Make a Spot Hidden check.',
+            'current_plot_raw_text': 'This scene requires a Spot Hidden roll.',
+            'latest_alignment': 'current_plot',
+            'player_profile': {'chosen_skill_allocations': {'occupation': ['Spot Hidden:70']}},
+        }
+        invalid_roll_state = agent.check_whether_roll_dice(invalid_roll_state)
+        assert invalid_roll_state.get('need_check') is False
+        assert invalid_roll_state.get('check_skill') == ''
+        assert invalid_roll_state.get('check_reason') == ''
+        assert invalid_roll_state.get('dice_type') == ''
 
         print('[test_agent_graph] result: PASS')
         return 0

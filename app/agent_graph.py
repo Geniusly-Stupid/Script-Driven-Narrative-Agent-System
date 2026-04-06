@@ -1021,95 +1021,6 @@ class NarrativeAgent:
                 aliases.setdefault(key, [key.lower()])
         return aliases
 
-    def _find_alias_index(self, text: str, alias: str) -> int:
-        haystack = (text or '').lower()
-        needle = (alias or '').strip().lower()
-        if not haystack or not needle:
-            return -1
-        if re.search(r'[a-z0-9]', needle):
-            match = re.search(rf'(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])', haystack)
-            return -1 if match is None else match.start()
-        return haystack.find(needle)
-
-    def _extract_requested_skills(self, text: str, state: NarrativeState) -> list[str]:
-        normalized = (text or '').strip().lower()
-        if not normalized:
-            return []
-        explicit_markers = ('check', 'roll', '检定', '骰', 'make ', '进行一次', '进行一', '需要', 'required', 'requires')
-        if not any(marker in normalized for marker in explicit_markers):
-            return []
-        negation_markers = (
-            'nothing forces',
-            'no roll',
-            'no check',
-            'no need',
-            'not require',
-            'does not require',
-            "doesn't require",
-            'without a roll',
-            '无需',
-            '不需要',
-            '不用',
-            '没有必要',
-        )
-        segments = [normalized]
-        segments.extend(part.strip() for part in re.findall(r'[\(（]([^()（）]{0,240})[\)）]', normalized) if part.strip())
-        segments.extend(part.strip() for part in re.split(r'[\n\r。！？!?]', normalized) if part.strip())
-
-        found: list[tuple[int, str]] = []
-        seen_pairs: set[tuple[int, str]] = set()
-        for segment in segments:
-            if not any(marker in segment for marker in explicit_markers):
-                continue
-            if any(marker in segment for marker in negation_markers):
-                continue
-            for canonical_name, alias_list in self._roll_check_aliases(state).items():
-                for alias in alias_list:
-                    idx = self._find_alias_index(segment, alias)
-                    if idx < 0:
-                        continue
-                    pair = (idx, canonical_name)
-                    if pair in seen_pairs:
-                        continue
-                    seen_pairs.add(pair)
-                    found.append(pair)
-                    continue
-        found.sort(key=lambda item: item[0])
-
-        ordered: list[str] = []
-        for _idx, name in found:
-            if name not in ordered:
-                ordered.append(name)
-        return ordered
-
-    def _fallback_roll_check_decision(self, state: NarrativeState) -> dict[str, Any]:
-        latest_excerpt = str(state.get('latest_agent_turn_excerpt', '') or '')
-        requested_skills = self._extract_requested_skills(latest_excerpt, state)
-        if requested_skills:
-            preferred = next(
-                (skill for skill in requested_skills if self._resolve_skill_value(state, skill) is not None),
-                requested_skills[0],
-            )
-            return {
-                'need_check': True,
-                'skill': preferred,
-                'reason': f"Keeper prompt requested a {preferred} check.",
-                'dice_type': '1d100',
-            }
-
-        current_plot_skills = self._extract_requested_skills(str(state.get('current_plot_raw_text', '') or ''), state)
-        unique_plot_skills = [skill for skill in current_plot_skills if skill]
-        if len(unique_plot_skills) == 1 and state.get('latest_alignment') != 'off_topic':
-            preferred = unique_plot_skills[0]
-            return {
-                'need_check': True,
-                'skill': preferred,
-                'reason': f"Current plot explicitly centers on a {preferred} check.",
-                'dice_type': '1d100',
-            }
-
-        return {'need_check': False, 'skill': '', 'reason': '', 'dice_type': ''}
-
     def _refresh_resolved_check_summary(self, state: NarrativeState) -> None:
         dice_result = str(state.get('dice_result') or '').strip()
         skill_check_result = str(state.get('skill_check_result') or '').strip()
@@ -1531,11 +1442,10 @@ class NarrativeAgent:
                     state['check_reason'] = ''
                     state['dice_type'] = ''
             else:
-                fallback = self._fallback_roll_check_decision(state)
-                state['need_check'] = bool(fallback.get('need_check', False))
-                state['check_skill'] = str(fallback.get('skill', '')).strip()
-                state['check_reason'] = str(fallback.get('reason', '')).strip()
-                state['dice_type'] = str(fallback.get('dice_type', '')).strip()
+                state['need_check'] = False
+                state['check_skill'] = ''
+                state['check_reason'] = ''
+                state['dice_type'] = ''
             logger.info(
                 "Roll check decision need_check=%s skill=%s reason=%s dice_type=%s",
                 state.get('need_check'),
@@ -1545,11 +1455,10 @@ class NarrativeAgent:
             )
         except Exception as exc:
             logger.error("Roll check evaluation failed error=%s", exc)
-            fallback = self._fallback_roll_check_decision(state)
-            state['need_check'] = bool(fallback.get('need_check', False))
-            state['check_skill'] = str(fallback.get('skill', '')).strip()
-            state['check_reason'] = str(fallback.get('reason', '')).strip()
-            state['dice_type'] = str(fallback.get('dice_type', '')).strip()
+            state['need_check'] = False
+            state['check_skill'] = ''
+            state['check_reason'] = ''
+            state['dice_type'] = ''
         self._refresh_resolved_check_summary(state)
         return state
 
