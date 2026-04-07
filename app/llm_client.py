@@ -12,6 +12,8 @@ NVIDIA_INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 NVIDIA_DEFAULT_MODEL = "qwen/qwen2.5-7b-instruct"
 OPENAI_INVOKE_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+LLM_BACKEND_FILE = "llm_backend.txt"
 logger = logging.getLogger(__name__)
 _GLOBAL_RETRYABLE_COOLDOWN_UNTIL = 0.0
 
@@ -125,7 +127,7 @@ def _load_api_key(*, env_var: str, key_filename: str) -> str:
     if api_key:
         return api_key
 
-    key_path = Path(__file__).resolve().parent.parent.joinpath(key_filename)
+    key_path = PROJECT_ROOT.joinpath(key_filename)
     if not key_path.exists():
         raise ValueError(f"{key_filename} not found in project root and {env_var} is not set")
     text = key_path.read_text(encoding="utf-8")
@@ -136,13 +138,40 @@ def _load_api_key(*, env_var: str, key_filename: str) -> str:
     return api_key
 
 
+def _read_llm_backend_from_file() -> str | None:
+    """First non-empty, non-comment line from project-root llm_backend.txt."""
+    path = PROJECT_ROOT / LLM_BACKEND_FILE
+    if not path.exists():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        return line.lower()
+    return None
+
+
 def _normalize_provider(provider: str | None) -> str:
-    provider = (provider or os.getenv("LLM_PROVIDER") or "nvidia").strip().lower()
-    if provider in {"nvidia", "nv"}:
+    """
+    Resolve backend: explicit arg > LLM_PROVIDER env > llm_backend.txt > default qwen (NVIDIA/Qwen).
+    File/env may use qwen | nvidia | openai (aliases documented in README).
+    """
+    raw = (provider or "").strip() if provider is not None else ""
+    if not raw:
+        raw = (os.getenv("LLM_PROVIDER") or "").strip()
+    if not raw:
+        raw = (_read_llm_backend_from_file() or "").strip()
+    if not raw:
+        raw = "qwen"
+    key = raw.lower()
+    if key in {"qwen", "nvidia", "nv"}:
         return "nvidia"
-    if provider in {"openai", "oai"}:
+    if key in {"openai", "oai"}:
         return "openai"
-    raise ValueError(f"Unsupported LLM_PROVIDER={provider!r}. Expected 'nvidia' or 'openai'.")
+    raise ValueError(
+        f"Unsupported LLM backend {raw!r}. Use qwen (NVIDIA), nvidia, or openai "
+        f"(see {LLM_BACKEND_FILE} or LLM_PROVIDER)."
+    )
 
 
 def _call_openai_llm(
@@ -451,7 +480,7 @@ def call_nvidia_llm(
     allow_env_override: bool = True,
 ) -> str:
     # Backward-compatible entrypoint used across the codebase.
-    # Despite the name, it supports multiple providers via LLM_PROVIDER (default: nvidia).
+    # Despite the name, it supports multiple backends via llm_backend.txt / LLM_PROVIDER (default: qwen/NVIDIA).
     #
     # Kept for compatibility with older call sites that pass allow_env_override.
     # If False, we avoid overriding the user-supplied model via *_MODEL env vars.

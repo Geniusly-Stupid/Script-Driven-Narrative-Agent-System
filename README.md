@@ -45,6 +45,7 @@ A local standalone script-driven narrative agent built as a single Python app.
 main.py
 requirements.txt
 README.md
+llm_backend.txt          # qwen | openai (which LLM backend to use)
 ```
 
 ## Core Components
@@ -151,34 +152,52 @@ This separation keeps deterministic state operations isolated from semantic sear
 
 ## Setup
 
-Before running the project, choose an LLM provider.
+### 1) Choose the LLM backend (one file, default is Qwen / NVIDIA)
 
-### Option A: NVIDIA (default)
+In the project root, edit **`llm_backend.txt`**. The first non-empty line that is not a comment (`#`) must be either:
 
-Get an API key from:
+- **`qwen`** — use the NVIDIA Build API with Qwen models (same as writing `nvidia`; this is the **default**).
+- **`openai`** — use the OpenAI Chat Completions API instead.
 
-[https://build.nvidia.com/settings/api-keys](https://build.nvidia.com/settings/api-keys)
+Example:
 
-Then create a file named:
-
-```bash
-api_key.txt
+```text
+qwen
 ```
 
-Place it in the project root directory and paste your API key inside (only the key, no extra spaces, utf-8 encoding).
+To switch to OpenAI, change that line to:
 
-You can also set the environment variable `NVIDIA_API_KEY` instead of using the file.
-
-### Option B: OpenAI
-
-Set:
-
-```bash
-export LLM_PROVIDER=openai
-export OPENAI_API_KEY="YOUR_KEY"
+```text
+openai
 ```
 
-Optionally select model and generation parameters:
+Reference copy: **`llm_backend.example.txt`** (you can duplicate it to `llm_backend.txt` if needed).
+
+**Override (optional):** for CI or one-off runs, set environment variable `LLM_PROVIDER` to `qwen`, `nvidia`, or `openai`. It takes precedence over `llm_backend.txt`.
+
+### 2) API keys
+
+**Qwen / NVIDIA** (when backend is `qwen` or `nvidia`):
+
+- Get a key from [NVIDIA Build API keys](https://build.nvidia.com/settings/api-keys).
+- Put it in project root **`api_key.txt`** (single line), or set **`NVIDIA_API_KEY`**, or use a combined file (see below).
+
+**OpenAI** (when backend is `openai`):
+
+- Set **`OPENAI_API_KEY`**, or put the key in **`openai_api_key.txt`**, or add a line to **`api_key.txt`**:
+
+```text
+OPENAI_API_KEY=sk-...
+```
+
+**Both backends in one `api_key.txt` (optional):**
+
+```text
+NVIDIA_API_KEY=nvapi-...
+OPENAI_API_KEY=sk-...
+```
+
+OpenAI-only tuning (optional):
 
 ```bash
 export OPENAI_MODEL="gpt-4o-mini"
@@ -187,15 +206,7 @@ export OPENAI_TEMPERATURE=0.6
 export OPENAI_TOP_P=0.95
 ```
 
-If you prefer a file over env vars, you can either:
-
-- Put OpenAI key in `openai_api_key.txt` (project root), or
-- Put BOTH keys in `api_key.txt` using `KEY=VALUE` lines:
-
-```bash
-NVIDIA_API_KEY=nvapi-...
-OPENAI_API_KEY=sk-...
-```
+No code changes are required to switch: edit **`llm_backend.txt`** and ensure the matching API key is configured.
 
 Once the API key is set up, create and activate a virtual environment:
 
@@ -250,7 +261,7 @@ Directory contents (each file except `app/ui.py` has a corresponding test):
 
 * `test/test_llm_generate.py`: Tests the raw LLM API call (streaming behavior, thinking/reasoning/content parsing).
   
-  ⚠️ **Before running this test, make sure `api_key.txt` has been created and configured as described in the Setup section.**
+  ⚠️ **Before running this test, make sure API keys are configured as described in the Setup section** (`api_key.txt` / env vars).
 
   ⚠️ **All LLM invocation logic in the project must stay aligned with this file.**
 

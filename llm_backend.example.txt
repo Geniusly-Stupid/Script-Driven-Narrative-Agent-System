@@ -1,0 +1,4 @@
+# Copy to llm_backend.txt and keep a single active line (or delete comments).
+# qwen  = NVIDIA Build API with Qwen models (default)
+# openai = OpenAI Chat Completions API
+qwen
