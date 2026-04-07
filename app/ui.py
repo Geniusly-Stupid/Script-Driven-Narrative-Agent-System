@@ -6,9 +6,9 @@ import re
 
 import streamlit as st
 
-from app.agent_graph import KP_OPENING_MARKER, NarrativeAgent
+from app.agent_graph import NarrativeAgent
 from app.database import Database
-from app.parser import parse_script_bundle, read_pdf_pages
+from app.parser import detect_source_type, parse_script_bundle, read_uploaded_document
 from app.rules_loader import load_game_rules_knowledge
 from app.vector_store import ChromaStore
 
@@ -89,6 +89,11 @@ def _inject_demo_theme() -> None:
             --um-blue-soft: #5a6d82;
             --um-maize: #d7b14a;
             --um-ink: #1f2d3a;
+            --um-ink-strong: #14212e;
+            --um-panel: rgba(255, 253, 248, 0.94);
+            --um-panel-soft: rgba(252, 249, 242, 0.92);
+            --um-code-bg: #161b26;
+            --um-code-ink: #f3f7fb;
             --um-paper: #f5f1e8;
             --um-line: rgba(0, 39, 76, 0.12);
         }
@@ -102,8 +107,63 @@ def _inject_demo_theme() -> None:
             color: var(--um-ink);
         }
 
+        .stApp,
+        .stApp p,
+        .stApp li,
+        .stApp label,
+        .stApp span,
+        .stApp div,
+        .stMarkdown,
+        [data-testid="stMarkdownContainer"],
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] li,
+        [data-testid="stMarkdownContainer"] span {
+            color: var(--um-ink-strong);
+        }
+
         [data-testid="stHeader"] {
             background: rgba(245, 241, 232, 0.9);
+        }
+
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(245, 241, 232, 0.98), rgba(239, 234, 222, 0.98));
+            color: var(--um-ink-strong);
+        }
+
+        [data-testid="stSidebar"] *,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] div,
+        [data-testid="stSidebar"] button {
+            color: var(--um-ink-strong) !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stWidgetLabel"],
+        [data-testid="stSidebar"] .stCheckbox label,
+        [data-testid="stSidebar"] .stRadio label,
+        [data-testid="stSidebar"] .stSelectbox label,
+        [data-testid="stSidebar"] .stToggle label,
+        [data-testid="stSidebar"] [role="switch"] + div,
+        [data-testid="stSidebar"] [role="switch"] ~ * {
+            color: var(--um-ink-strong) !important;
+        }
+
+        [data-testid="stSidebar"] [role="switch"] {
+            background: #efe4c6 !important;
+            border: 1px solid rgba(0, 39, 76, 0.28) !important;
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
+        }
+
+        [data-testid="stSidebar"] [role="switch"][aria-checked="true"] {
+            background: #d7b14a !important;
+            border-color: rgba(0, 39, 76, 0.45) !important;
+        }
+
+        [data-testid="stSidebar"] [role="switch"] > div,
+        [data-testid="stSidebar"] [role="switch"] [data-testid="stThumbValue"] {
+            background: #16304d !important;
+            color: #16304d !important;
         }
 
         .block-container {
@@ -118,7 +178,7 @@ def _inject_demo_theme() -> None:
         }
 
         .gm-section-eyebrow {
-            color: rgba(31, 45, 58, 0.65);
+            color: rgba(31, 45, 58, 0.82);
             font-size: 0.76rem;
             letter-spacing: 0.08em;
             text-transform: uppercase;
@@ -134,13 +194,13 @@ def _inject_demo_theme() -> None:
         }
 
         .gm-section-copy {
-            color: rgba(31, 45, 58, 0.7);
+            color: var(--um-ink-strong);
             font-size: 0.93rem;
             margin-bottom: 0.6rem;
         }
 
         div[data-testid="stMetric"] {
-            background: rgba(255, 255, 255, 0.55);
+            background: var(--um-panel);
             border: 1px solid var(--um-line);
             border-radius: 10px;
             padding: 0.65rem 0.75rem;
@@ -148,7 +208,7 @@ def _inject_demo_theme() -> None:
         }
 
         div[data-testid="stMetric"] label {
-            color: rgba(31, 45, 58, 0.65) !important;
+            color: rgba(31, 45, 58, 0.82) !important;
             font-weight: 700 !important;
         }
 
@@ -161,8 +221,8 @@ def _inject_demo_theme() -> None:
         .stDownloadButton > button {
             border-radius: 8px;
             border: 1px solid rgba(0, 39, 76, 0.18);
-            background: rgba(215, 177, 74, 0.18);
-            color: var(--um-blue);
+            background: rgba(215, 177, 74, 0.32);
+            color: var(--um-ink-strong);
             font-weight: 700;
             padding: 0.45rem 0.85rem;
             box-shadow: none;
@@ -171,7 +231,34 @@ def _inject_demo_theme() -> None:
         .stButton > button:hover,
         .stDownloadButton > button:hover {
             border-color: rgba(0, 39, 76, 0.28);
-            background: rgba(215, 177, 74, 0.25);
+            background: rgba(215, 177, 74, 0.42);
+        }
+
+        .stButton > button[kind="tertiary"] {
+            border-radius: 999px;
+            border: 1px solid rgba(0, 39, 76, 0.14);
+            background: rgba(255, 251, 244, 0.78);
+            color: rgba(20, 33, 46, 0.94);
+            font-weight: 600;
+            font-size: 0.8rem;
+            letter-spacing: 0.01em;
+            padding: 0.18rem 0.78rem;
+            min-height: 2rem;
+            box-shadow: 0 1px 0 rgba(0, 39, 76, 0.03);
+            backdrop-filter: blur(6px);
+        }
+
+        .stButton > button[kind="tertiary"]:hover {
+            border-color: rgba(0, 39, 76, 0.22);
+            background: rgba(255, 252, 247, 0.96);
+            color: var(--um-blue);
+        }
+
+        .stButton > button[kind="tertiary"]:disabled {
+            opacity: 0.5;
+            background: rgba(255, 251, 244, 0.62);
+            color: rgba(31, 45, 58, 0.5);
+            border-color: rgba(0, 39, 76, 0.1);
         }
 
         .stTextInput input,
@@ -182,7 +269,44 @@ def _inject_demo_theme() -> None:
         [data-testid="stChatInput"] {
             border-radius: 8px !important;
             border-color: rgba(0, 39, 76, 0.15) !important;
-            background: rgba(255, 255, 255, 0.76) !important;
+            background: var(--um-panel) !important;
+            color: var(--um-ink-strong) !important;
+        }
+
+        .stTextInput input::placeholder,
+        .stTextArea textarea::placeholder,
+        .stNumberInput input::placeholder,
+        [data-testid="stChatInput"] textarea::placeholder {
+            color: #5b6673 !important;
+        }
+
+        .stTextInput label,
+        .stTextArea label,
+        .stNumberInput label,
+        .stSelectbox label,
+        .stFileUploader label,
+        .stRadio label,
+        .stCheckbox label,
+        .stCaption,
+        [data-testid="stWidgetLabel"],
+        [data-testid="stFileUploaderDropzoneInstructions"],
+        [data-testid="stFileUploaderDropzoneInstructions"] span {
+            color: var(--um-ink-strong) !important;
+        }
+
+        .stSelectbox [data-baseweb="select"] *,
+        .stMultiSelect [data-baseweb="select"] *,
+        .stTextInput input,
+        .stTextArea textarea,
+        .stNumberInput input {
+            color: var(--um-ink-strong) !important;
+        }
+
+        [data-baseweb="menu"] *,
+        [role="listbox"] *,
+        [role="option"] {
+            color: var(--um-ink-strong) !important;
+            background: #fffdf8 !important;
         }
 
         .stTextInput input:focus,
@@ -195,20 +319,39 @@ def _inject_demo_theme() -> None:
         [data-testid="stExpander"] {
             border-radius: 8px;
             border: 1px solid var(--um-line);
-            background: rgba(255, 255, 255, 0.5);
+            background: var(--um-panel-soft);
             overflow: hidden;
+        }
+
+        [data-testid="stExpander"] summary,
+        [data-testid="stExpander"] details,
+        [data-testid="stExpander"] details > div,
+        [data-testid="stExpander"] [data-testid="stMarkdownContainer"],
+        [data-testid="stExpander"] summary *,
+        [data-testid="stAlert"] *,
+        [data-testid="stChatMessage"] * {
+            color: var(--um-ink-strong) !important;
+        }
+
+        [data-testid="stExpander"] summary {
+            background: rgba(247, 241, 229, 0.92) !important;
+        }
+
+        [data-testid="stExpander"] details > div {
+            background: rgba(255, 251, 244, 0.96) !important;
         }
 
         [data-testid="stAlert"] {
             border-radius: 8px;
             border: 1px solid var(--um-line);
+            background: rgba(255, 251, 244, 0.96);
         }
 
         [data-testid="stChatMessage"] {
-            background: transparent;
+            background: rgba(255, 252, 247, 0.62);
             border: none;
-            border-radius: 0;
-            padding: 0.2rem 0;
+            border-radius: 10px;
+            padding: 0.55rem 0.7rem;
             margin-bottom: 0.6rem;
             box-shadow: none;
         }
@@ -222,13 +365,74 @@ def _inject_demo_theme() -> None:
             background: linear-gradient(90deg, rgba(215, 177, 74, 0.8), rgba(0, 39, 76, 0.45)) !important;
         }
 
-        .stCodeBlock pre {
-            border-radius: 8px !important;
-            border: 1px solid rgba(0, 39, 76, 0.10);
+        .stCodeBlock,
+        .stCode,
+        [data-testid="stCode"],
+        [data-testid="stCodeBlock"] {
+            background: transparent !important;
+        }
+
+        .stCodeBlock pre,
+        .stCode pre,
+        [data-testid="stCode"] pre,
+        [data-testid="stCodeBlock"] pre {
+            background: #111827 !important;
+            color: #f8fafc !important;
+            border: 1px solid #334155 !important;
+            border-radius: 10px !important;
+            padding: 0.95rem 1rem !important;
+            margin: 0.35rem 0 0 0 !important;
+            overflow-x: auto !important;
+            white-space: pre-wrap !important;
+            word-break: break-word !important;
+            box-shadow: none !important;
+        }
+
+        .stCodeBlock pre code,
+        .stCode pre code,
+        [data-testid="stCode"] pre code,
+        [data-testid="stCodeBlock"] pre code {
+            display: block !important;
+            background: transparent !important;
+            color: #f8fafc !important;
+            font-family: Consolas, "SFMono-Regular", Menlo, Monaco, monospace !important;
+            font-size: 0.92rem !important;
+            line-height: 1.58 !important;
+            text-shadow: none !important;
+            -webkit-text-fill-color: #f8fafc !important;
+        }
+
+        .stCodeBlock pre code *,
+        .stCode pre code *,
+        [data-testid="stCode"] pre code *,
+        [data-testid="stCodeBlock"] pre code * {
+            background: transparent !important;
+            color: inherit !important;
+            -webkit-text-fill-color: currentColor !important;
+            text-shadow: none !important;
+            opacity: 1 !important;
+            border: none !important;
+            box-shadow: none !important;
         }
 
         .stCaption {
-            color: rgba(31, 45, 58, 0.64);
+            color: #344557;
+        }
+
+        button[kind="secondary"],
+        button[kind="secondary"] *,
+        [data-baseweb="tab-list"] *,
+        [data-baseweb="tab"] *,
+        [role="tab"] * {
+            color: var(--um-ink-strong) !important;
+        }
+
+        [data-baseweb="tab"] {
+            background: rgba(248, 243, 233, 0.94) !important;
+        }
+
+        [aria-selected="true"][data-baseweb="tab"] {
+            background: rgba(215, 177, 74, 0.26) !important;
         }
 
         .gm-statusline {
@@ -237,7 +441,7 @@ def _inject_demo_theme() -> None:
             z-index: 10;
             margin: 0.2rem 0 1rem 0;
             padding: 0.4rem 0;
-            color: rgba(31, 45, 58, 0.66);
+            color: var(--um-ink-strong);
             font-size: 0.92rem;
             background: linear-gradient(180deg, rgba(247, 244, 236, 0.95), rgba(247, 244, 236, 0.82));
             backdrop-filter: blur(4px);
@@ -252,7 +456,7 @@ def _inject_demo_theme() -> None:
             flex-direction: column;
             align-items: center;
             gap: 0.55rem;
-            color: rgba(31, 45, 58, 0.78);
+            color: var(--um-ink-strong);
         }
 
         .gm-parse-overlay {
@@ -270,7 +474,7 @@ def _inject_demo_theme() -> None:
             display: inline-flex;
             align-items: center;
             gap: 0.5rem;
-            color: rgba(31, 45, 58, 0.72);
+            color: var(--um-ink-strong);
             padding: 0.2rem 0;
         }
 
@@ -509,29 +713,14 @@ def _generate_coc_builds() -> list[dict[str, object]]:
     return builds
 
 
-def _load_messages_from_db(db: Database) -> tuple[list[dict[str, object]], set[str]]:
+def _load_messages_from_db(db: Database) -> list[dict[str, object]]:
     rows = db.conn.execute(
         'SELECT scene_id, plot_id, user, agent FROM memory ORDER BY id ASC'
     ).fetchall()
     messages: list[dict[str, object]] = []
-    shown_openings: set[str] = set()
     for row in rows:
-        scene_id = row['scene_id'] or ''
         user = row['user'] or ''
         agent = row['agent'] or ''
-        if user == KP_OPENING_MARKER:
-            messages.append(
-                {
-                    'user': '',
-                    'agent': agent,
-                    'dice': None,
-                    'skill_check': None,
-                    'debug_prompts': [],
-                }
-            )
-            if scene_id:
-                shown_openings.add(scene_id)
-            continue
         messages.append(
             {
                 'user': user,
@@ -541,7 +730,109 @@ def _load_messages_from_db(db: Database) -> tuple[list[dict[str, object]], set[s
                 'debug_prompts': [],
             }
         )
-    return messages, shown_openings
+    return messages
+
+
+STORY_RUNTIME_SESSION_KEYS = (
+    'coc_builds',
+    'character_stats_line',
+    'selected_archetype_name',
+    'occupation_alloc_text',
+    'interest_alloc_text',
+    'character_name_input',
+    'character_background_input',
+    'build_pick_label',
+)
+
+
+def _clear_story_runtime_session_state() -> None:
+    st.session_state.messages = []
+    st.session_state.last_retrieved = []
+    for key in STORY_RUNTIME_SESSION_KEYS:
+        st.session_state.pop(key, None)
+
+
+def _bump_script_upload_nonce() -> None:
+    st.session_state.script_upload_nonce = int(st.session_state.get('script_upload_nonce', 0)) + 1
+
+
+def _set_story_notice(kind: str, text: str) -> None:
+    st.session_state.story_notice = {'kind': kind, 'text': text}
+
+
+def _render_story_notice() -> None:
+    notice = st.session_state.pop('story_notice', None)
+    if not isinstance(notice, dict):
+        return
+    text = str(notice.get('text', '')).strip()
+    if not text:
+        return
+    kind = str(notice.get('kind', 'info')).strip().lower()
+    if kind == 'success':
+        st.success(text)
+    elif kind == 'warning':
+        st.warning(text)
+    elif kind == 'error':
+        st.error(text)
+    else:
+        st.info(text)
+
+
+def _reset_to_upload_stage(db: Database, vector: ChromaStore) -> None:
+    db.reset_story_data()
+    db.delete_initial_story_snapshot()
+    vector.reset()
+    db.update_system_state(
+        {
+            'stage': 'upload',
+            'current_scene_id': '',
+            'current_plot_id': '',
+            'plot_progress': 0.0,
+            'scene_progress': 0.0,
+            'player_profile': {},
+            'current_scene_intro': '',
+            'navigation_state': {},
+            'current_visit_id': 0,
+        }
+    )
+    _clear_story_runtime_session_state()
+    _bump_script_upload_nonce()
+
+
+def _render_story_management_actions(stage: str, db: Database, vector: ChromaStore) -> None:
+    if stage == 'upload':
+        return
+
+    spacer_col, action_col1, action_col2 = st.columns([6.0, 1.05, 1.25])
+    with action_col1:
+        restart_clicked = st.button(
+            'Restart Game',
+            key=f'restart_game_{stage}',
+            use_container_width=True,
+            disabled=not db.has_initial_story_snapshot(),
+            type='tertiary',
+        )
+    with action_col2:
+        reparse_clicked = st.button(
+            'Parse New Script',
+            key=f'parse_new_script_{stage}',
+            use_container_width=True,
+            type='tertiary',
+        )
+
+    if restart_clicked:
+        try:
+            db.restore_initial_story_snapshot()
+            _clear_story_runtime_session_state()
+            _set_story_notice('success', 'Game restarted from the parsed snapshot.')
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f'Restart failed: {exc}')
+
+    if reparse_clicked:
+        _reset_to_upload_stage(db, vector)
+        _set_story_notice('success', 'Story data cleared. Upload a new script to parse.')
+        st.rerun()
 
 
 def run_app() -> None:
@@ -552,10 +843,8 @@ def run_app() -> None:
         st.session_state.db = Database('narrative.db')
         st.session_state.vector = ChromaStore('.chroma')
         st.session_state.agent = NarrativeAgent(st.session_state.db, st.session_state.vector)
-        restored_messages, restored_openings = _load_messages_from_db(st.session_state.db)
-        st.session_state.messages = restored_messages
+        st.session_state.messages = _load_messages_from_db(st.session_state.db)
         st.session_state.last_retrieved = []
-        st.session_state.shown_openings = restored_openings
 
     db: Database = st.session_state.db
     vector: ChromaStore = st.session_state.vector
@@ -565,15 +854,16 @@ def run_app() -> None:
         agent = st.session_state.agent
 
     state = db.get_system_state()
-    existing_rule_items = [
-        item for item in db.get_knowledge_by_type('rule') if item.get('metadata', {}).get('source') == 'database/GameRules.md'
-    ]
-    if not existing_rule_items:
-        game_rules_knowledge = load_game_rules_knowledge()
-        if game_rules_knowledge:
-            db.insert_knowledge(game_rules_knowledge)
-            vector.add_from_scenes([], knowledge=game_rules_knowledge)
-            state = db.get_system_state()
+    if state.get('stage') != 'upload':
+        existing_rule_items = [
+            item for item in db.get_knowledge_by_type('rule') if item.get('metadata', {}).get('source') == 'database/GameRules.md'
+        ]
+        if not existing_rule_items:
+            game_rules_knowledge = load_game_rules_knowledge()
+            if game_rules_knowledge:
+                db.insert_knowledge(game_rules_knowledge)
+                vector.add_from_scenes([], knowledge=game_rules_knowledge)
+                state = db.get_system_state()
     language_options = ['English', 'Chinese']
     current_language = state.get('output_language', 'English')
     if current_language not in language_options:
@@ -590,24 +880,64 @@ def run_app() -> None:
         db.update_system_state({'output_language': selected_language})
         state = db.get_system_state()
     stage = state['stage']
+    _render_story_management_actions(stage, db, vector)
+    _render_story_notice()
     if stage == 'session' and not st.session_state.messages:
-        restored_messages, restored_openings = _load_messages_from_db(db)
+        restored_messages = _load_messages_from_db(db)
         st.session_state.messages = restored_messages
-        st.session_state.shown_openings = restored_openings
+        if not restored_messages and state.get('current_scene_id') and state.get('current_plot_id'):
+            initial_result = agent.generate_initial_response()
+            st.session_state.last_retrieved = initial_result.get('retrieved_docs', [])
+            st.session_state.messages.append(
+                {
+                    'user': '',
+                    'agent': initial_result.get('response', ''),
+                    'dice': initial_result.get('dice_result'),
+                    'skill_check': initial_result.get('skill_check_result'),
+                    'debug_prompts': initial_result.get('debug_prompts', []),
+                }
+            )
+            st.rerun()
 
     if stage != 'session':
         _render_status_line(state)
 
     if stage == 'upload':
         upload_panel = st.container()
+        uploaded = None
+        source_type = 'pdf'
+        source_unit_label = 'page'
         with upload_panel:
             _render_section_header('Upload Script', 'Step 1')
-            uploaded = st.file_uploader('Upload PDF script', type=['pdf'])
-            start_page = st.number_input('Start Page', min_value=1, value=1)
-            end_page = st.number_input('End Page (0 means auto)', min_value=0, value=0)
-            story_start_page = st.number_input('Story Start Page (PDF page, 0 means auto)', min_value=0, value=0)
-            story_end_page = st.number_input('Story End Page (PDF page, 0 means auto)', min_value=0, value=0)
-            st.caption('Set the story page range only if you want to override auto detection.')
+            upload_nonce = int(st.session_state.get('script_upload_nonce', 0))
+            uploaded = st.file_uploader(
+                'Upload script (.pdf, .md, .markdown)',
+                type=['pdf', 'md', 'markdown'],
+                key=f'script_upload_input_{upload_nonce}',
+            )
+            unsupported_type = False
+            if uploaded:
+                try:
+                    source_type = detect_source_type(uploaded.name, getattr(uploaded, 'type', None))
+                except ValueError:
+                    unsupported_type = True
+                    st.error('Unsupported file type. Please upload a PDF or Markdown file.')
+                source_unit_label = 'line' if source_type == 'markdown' else 'page'
+                st.caption(f"Detected source type: {source_type}. Range controls below use {source_unit_label}s.")
+            unit_title = source_unit_label.title()
+            start_page = st.number_input(f'Start {unit_title}', min_value=1, value=1)
+            end_page = st.number_input(f'End {unit_title} (0 means auto)', min_value=0, value=0)
+            story_start_page = st.number_input(
+                f'Story Start {unit_title} ({source_unit_label} number, 0 means auto)',
+                min_value=0,
+                value=0,
+            )
+            story_end_page = st.number_input(
+                f'Story End {unit_title} ({source_unit_label} number, 0 means auto)',
+                min_value=0,
+                value=0,
+            )
+            st.caption(f'Set the story {source_unit_label} range only if you want to override auto detection.')
             parse_clicked = bool(uploaded and st.button('Parse Script'))
 
         if parse_clicked:
@@ -617,25 +947,51 @@ def run_app() -> None:
                 _render_loading_state(parse_loading, 'Parsing the script...', centered=True)
                 if (story_start_page > 0) != (story_end_page > 0):
                     parse_loading.empty()
-                    st.error('Please fill both Story Start Page and Story End Page, or leave both as 0 for auto detection.')
+                    st.error(
+                        f'Please fill both Story Start {unit_title} and Story End {unit_title}, or leave both as 0 for auto detection.'
+                    )
                     st.stop()
 
-                read_start_page = int(start_page)
-                pages = read_pdf_pages(
+                if unsupported_type:
+                    parse_loading.empty()
+                    st.error('Unsupported file type. Please upload a PDF or Markdown file.')
+                    st.stop()
+
+                start_unit = int(start_page)
+                end_unit = int(end_page) if end_page > 0 else None
+                document = read_uploaded_document(
+                    uploaded.name,
                     uploaded.getvalue(),
-                    start_page=read_start_page,
-                    end_page=int(end_page) if end_page > 0 else None,
+                    start_unit=start_unit,
+                    end_unit=end_unit,
+                    mime_type=getattr(uploaded, 'type', None),
                 )
+                if not document.segments:
+                    parse_loading.empty()
+                    st.error(f'No readable {source_unit_label}s found in the uploaded file.')
+                    st.stop()
 
                 manual_story_start = None
                 manual_story_end = None
                 if story_start_page > 0 and story_end_page > 0:
-                    manual_story_start = int(story_start_page) - read_start_page + 1
-                    manual_story_end = int(story_end_page) - read_start_page + 1
+                    manual_story_start = int(story_start_page)
+                    manual_story_end = int(story_end_page)
+                    if (
+                        manual_story_start < document.display_start
+                        or manual_story_end > document.display_end
+                        or manual_story_start > document.display_end
+                        or manual_story_end < document.display_start
+                    ):
+                        parse_loading.empty()
+                        st.error(
+                            f'Story {source_unit_label} range must stay within the selected {source_unit_label} range '
+                            f'({document.display_start}-{document.display_end}).'
+                        )
+                        st.stop()
 
                 _render_loading_state(parse_loading, 'Organizing scenes...', centered=True)
                 bundle = parse_script_bundle(
-                    pages,
+                    source_document=document,
                     story_start_page=manual_story_start,
                     story_end_page=manual_story_end,
                 )
@@ -645,10 +1001,11 @@ def run_app() -> None:
                 all_knowledge = knowledge + game_rules_knowledge
                 structure = bundle.get('structure', {})
                 parse_warnings = bundle.get('warnings', [])
+                source_metadata = bundle.get('source_metadata', {})
 
                 if not scenes:
                     parse_loading.empty()
-                    st.error('No scenes extracted. Please check the PDF content or LLM output.')
+                    st.error(f'No scenes extracted. Please check the {source_type} content or LLM output.')
                     st.stop()
 
                 _render_loading_state(parse_loading, 'Preparing the world...', centered=True)
@@ -661,6 +1018,7 @@ def run_app() -> None:
                 db.save_summary('parse_structure', json.dumps(structure, ensure_ascii=False))
                 db.save_summary('parse_warnings', json.dumps(parse_warnings, ensure_ascii=False))
                 db.save_summary('parse_mode', bundle.get('parse_mode', 'balanced'))
+                db.save_summary('parse_source_meta', json.dumps(source_metadata, ensure_ascii=False))
 
                 first_scene = scenes[0]
                 first_plot = first_scene['plots'][0]
@@ -675,6 +1033,8 @@ def run_app() -> None:
                         'current_scene_intro': '',
                     }
                 )
+                db.save_initial_story_snapshot()
+                _clear_story_runtime_session_state()
 
                 parse_loading.empty()
                 st.success(
@@ -692,6 +1052,13 @@ def run_app() -> None:
         scenes = db.list_scenes()
         plot_count = sum(len(scene.get('plots', [])) for scene in scenes)
         est_minutes = plot_count * 10
+        source_meta_raw = db.get_summary('parse_source_meta')
+        try:
+            source_meta = json.loads(source_meta_raw) if source_meta_raw else {}
+        except Exception:
+            source_meta = {}
+        source_unit_label = str(source_meta.get('source_unit_label', 'page') or 'page')
+        source_unit_title = source_unit_label.title()
 
         if debug_mode:
             structure_raw = db.get_summary('parse_structure')
@@ -706,6 +1073,10 @@ def run_app() -> None:
             parse_mode = db.get_summary('parse_mode')
             if parse_mode:
                 st.caption(f'Parse mode: {parse_mode}')
+
+            if source_meta:
+                st.markdown('#### Source Metadata')
+                st.write(source_meta)
 
             warnings_raw = db.get_summary('parse_warnings')
             if warnings_raw:
@@ -723,7 +1094,10 @@ def run_app() -> None:
                     {
                         'scene_id': scene['scene_id'],
                         'scene_goal': scene['scene_goal'],
-                        'source_pages': f"{scene.get('source_page_start', '?')}-{scene.get('source_page_end', '?')}",
+                        f'source_{source_unit_label}s': (
+                            f"{source_unit_title} "
+                            f"{scene.get('source_page_start', '?')}-{scene.get('source_page_end', '?')}"
+                        ),
                         'scene_description': (scene.get('scene_description', '') or '')[:120],
                         'plots': len(scene.get('plots', [])),
                     }
@@ -880,21 +1254,6 @@ def run_app() -> None:
             st.rerun()
 
     else:
-        _render_status_line(state)
-        opening_key = state['current_scene_id']
-        opening_text = agent.ensure_kp_opening(state['current_scene_id'], state['current_plot_id'])
-        if opening_text and opening_key not in st.session_state.shown_openings:
-            st.session_state.messages.append(
-                {
-                    'user': '',
-                    'agent': opening_text,
-                    'dice': None,
-                    'skill_check': None,
-                    'debug_prompts': list(getattr(agent, 'latest_debug_prompts', [])),
-                }
-            )
-            st.session_state.shown_openings.add(opening_key)
-
         for turn in st.session_state.messages:
             if turn['user']:
                 st.chat_message('user').write(turn['user'])
@@ -906,8 +1265,9 @@ def run_app() -> None:
             if debug_mode and turn.get('debug_prompts'):
                 with st.expander('Debug Prompts', expanded=False):
                     for idx, item in enumerate(turn.get('debug_prompts', []), start=1):
-                        st.caption(f"{idx}. {item.get('name', 'prompt')}")
-                        st.code(item.get('prompt', ''), language='text')
+                        label = f"{idx}. {item.get('name', 'prompt')}"
+                        with st.expander(label, expanded=False):
+                            st.code(item.get('prompt', ''), language='text')
 
         user_msg = st.chat_input('Describe your action...')
         if user_msg:

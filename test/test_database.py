@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -8,169 +7,106 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.database import Database
+from app.navigation import default_navigation
 
 
-def _create_legacy_db(db_path: Path) -> None:
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        '''
-        CREATE TABLE IF NOT EXISTS scenes (
-            scene_id TEXT PRIMARY KEY,
-            scene_goal TEXT NOT NULL,
-            status TEXT NOT NULL,
-            scene_summary TEXT NOT NULL DEFAULT ''
-        );
-
-        CREATE TABLE IF NOT EXISTS plots (
-            plot_id TEXT PRIMARY KEY,
-            scene_id TEXT NOT NULL,
-            plot_goal TEXT NOT NULL,
-            mandatory_events TEXT NOT NULL,
-            npc TEXT NOT NULL,
-            locations TEXT NOT NULL,
-            status TEXT NOT NULL,
-            progress REAL NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS memory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            scene_id TEXT NOT NULL,
-            plot_id TEXT NOT NULL,
-            user TEXT NOT NULL,
-            agent TEXT NOT NULL,
-            timestamp TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS summaries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            summary_type TEXT NOT NULL,
-            scene_id TEXT,
-            plot_id TEXT,
-            content TEXT NOT NULL,
-            UNIQUE(summary_type, scene_id, plot_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS system_state (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            stage TEXT NOT NULL,
-            current_scene_id TEXT NOT NULL,
-            current_plot_id TEXT NOT NULL,
-            plot_progress REAL NOT NULL,
-            scene_progress REAL NOT NULL,
-            player_profile TEXT NOT NULL,
-            current_scene_intro TEXT NOT NULL
-        );
-        '''
-    )
-    conn.execute(
-        "INSERT OR REPLACE INTO system_state (id, stage, current_scene_id, current_plot_id, plot_progress, scene_progress, player_profile, current_scene_intro) VALUES (1, 'upload', '', '', 0.0, 0.0, '{}', '')"
-    )
-    conn.commit()
-    conn.close()
-
-
-def main() -> int:
-    db_path = ROOT / 'test' / 'debug_narrative.db'
-    print(f'[test_database] input: db_path={db_path}')
-
-    try:
-        if db_path.exists():
-            os.remove(db_path)
-
-        _create_legacy_db(db_path)
-        db = Database(str(db_path))
-        print('[test_database] output: initialized and migrated SQLite successfully')
-
-        scene_cols = [r['name'] for r in db.conn.execute('PRAGMA table_info(scenes)').fetchall()]
-        plot_cols = [r['name'] for r in db.conn.execute('PRAGMA table_info(plots)').fetchall()]
-        print('[test_database] output: scenes columns ->', scene_cols)
-        print('[test_database] output: plots columns ->', plot_cols)
-
-        assert 'scene_description' in scene_cols, 'scene_description column migration failed'
-        assert 'source_page_start' in scene_cols and 'source_page_end' in scene_cols, 'scene span columns migration failed'
-        assert 'source_page_start' in plot_cols and 'source_page_end' in plot_cols, 'plot span columns migration failed'
-
-        knowledge_table = db.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_base'"
-        ).fetchone()
-        assert knowledge_table is not None, 'knowledge_base table migration failed'
-
-        scenes = [
+def _build_db(db_path: Path) -> Database:
+    if db_path.exists():
+        os.remove(db_path)
+    db = Database(str(db_path))
+    nav = default_navigation()
+    db.insert_scenes(
+        [
             {
                 'scene_id': 'scene_t1',
-                'scene_goal': 'Test scene write',
-                'scene_description': 'A detailed paragraph that guides pacing and choices.',
-                'source_page_start': 3,
-                'source_page_end': 5,
-                'status': 'pending',
+                'scene_goal': 'Follow the first lead.',
+                'scene_description': 'A small test scene.',
+                'status': 'in_progress',
                 'scene_summary': '',
+                'node_kind': 'linear',
+                'navigation': nav,
                 'plots': [
                     {
                         'plot_id': 'scene_t1_plot_1',
-                        'plot_goal': 'Test plot write',
-                        'mandatory_events': ['event_a', 'event_b'],
-                        'npc': ['Alice'],
-                        'locations': ['Hall'],
-                        'source_page_start': 3,
-                        'source_page_end': 4,
-                        'status': 'pending',
+                        'plot_goal': 'Inspect the room.',
+                        'mandatory_events': [],
+                        'npc': [],
+                        'locations': [],
+                        'raw_text': 'A quiet room with scattered notes.',
+                        'status': 'in_progress',
                         'progress': 0.0,
-                    },
-                    {
-                        'plot_id': 'scene_t1_plot_2',
-                        'plot_goal': 'Test plot write 2',
-                        'mandatory_events': ['event_c'],
-                        'npc': ['Bob'],
-                        'locations': ['Street'],
-                        'source_page_start': 5,
-                        'source_page_end': 5,
-                        'status': 'pending',
-                        'progress': 0.0,
-                    },
+                        'node_kind': 'linear',
+                        'navigation': nav,
+                    }
                 ],
             }
         ]
-        print('[test_database] input: insert scenes')
-        db.insert_scenes(scenes)
+    )
+    return db
 
-        knowledge_items = [
-            {
-                'knowledge_id': 'knowledge_1',
-                'knowledge_type': 'setting',
-                'title': 'Town Rule',
-                'content': 'No one leaves after dusk.',
-                'source_page_start': 1,
-                'source_page_end': 1,
-                'metadata': {'source': 'preface'},
-            }
-        ]
-        print('[test_database] input: insert knowledge')
-        db.insert_knowledge(knowledge_items)
 
-        fetched = db.get_scene('scene_t1')
-        print('[test_database] output: fetched scene ->', fetched)
-        assert fetched is not None and fetched.get('scene_description'), 'scene_description persistence failed'
-        assert fetched.get('source_page_start') == 3 and fetched.get('source_page_end') == 5, 'scene span persistence failed'
-        assert len(fetched.get('plots', [])) == 2
-        assert fetched['plots'][0].get('source_page_start') == 3
+def main() -> int:
+    db_path = ROOT / 'test' / 'debug_database_turn_state.db'
+    db = None
+    reopened = None
+    try:
+        print('[test_database] input: create database and persist structured turn state')
+        db = _build_db(db_path)
+        turn_state = {
+            'choice_open': True,
+            'offered_targets': [{'target_kind': 'scene', 'target_id': 'scene_t1'}],
+            'beat_status': 'wrapped',
+            'summary': 'keeper offered a follow-up lead',
+        }
+        db.append_memory(
+            'scene_t1',
+            'scene_t1_plot_1',
+            'hello',
+            'world',
+            visit_id=7,
+            turn_state=turn_state,
+        )
+        turns = db.get_recent_turns('scene_t1', 'scene_t1_plot_1', limit=5, visit_id=7)
+        assert len(turns) == 1, 'expected one persisted memory turn'
+        assert turns[0]['visit_id'] == 7, 'visit_id should round-trip'
+        assert turns[0]['turn_state'] == turn_state, 'turn_state_json should hydrate back into dict form'
 
-        fetched_knowledge = db.get_knowledge_by_type('setting')
-        print('[test_database] output: fetched knowledge ->', fetched_knowledge)
-        assert len(fetched_knowledge) == 1, 'knowledge retrieval failed'
-
-        print('[test_database] input: reset story data')
-        db.reset_story_data()
-        scene_count = db.conn.execute('SELECT COUNT(*) AS c FROM scenes').fetchone()['c']
-        knowledge_count = db.conn.execute('SELECT COUNT(*) AS c FROM knowledge_base').fetchone()['c']
-        print('[test_database] output: counts after reset ->', {'scenes': scene_count, 'knowledge': knowledge_count})
-        assert scene_count == 0 and knowledge_count == 0, 'reset_story_data should clear scenes and knowledge'
-
+        print('[test_database] input: reopen database and confirm turn_state_json migration persists')
         db.close()
+        db = None
+        reopened = Database(str(db_path))
+        reopened_turns = reopened.get_recent_turns('scene_t1', 'scene_t1_plot_1', limit=5, visit_id=7)
+        assert reopened_turns[0]['turn_state'] == turn_state, 'reopened database should preserve turn_state_json'
+
+        print('[test_database] input: check runtime story-specific patches are gone')
+        for source_path in (
+            ROOT / 'app' / 'database.py',
+            ROOT / 'app' / 'state.py',
+            ROOT / 'app' / 'agent_graph.py',
+        ):
+            source = source_path.read_text(encoding='utf-8')
+            for token in (
+                '_apply_bundled_story_repairs',
+                '_repair_',
+                '_invalidate_',
+                'Kimball',
+                'scene_11',
+                'scene_12',
+            ):
+                assert token not in source, f'{token} should not remain in {source_path.name}'
+
         print('[test_database] result: PASS')
         return 0
     except Exception as exc:  # noqa: BLE001
         print(f'[test_database] result: FAIL -> {exc}')
         return 1
+    finally:
+        if db is not None:
+            db.close()
+        if reopened is not None:
+            reopened.close()
+        if db_path.exists():
+            os.remove(db_path)
 
 
 if __name__ == '__main__':
