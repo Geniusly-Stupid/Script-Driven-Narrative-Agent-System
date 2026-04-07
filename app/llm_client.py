@@ -138,6 +138,39 @@ def _load_api_key(*, env_var: str, key_filename: str) -> str:
     return api_key
 
 
+def _load_openai_api_key() -> str:
+    """
+    OpenAI key sources (first match wins — no merge, no conflict):
+    1) OPENAI_API_KEY environment variable
+    2) openai_api_key.txt (bare sk-... or KEY=VALUE lines)
+    3) api_key.txt line OPENAI_API_KEY=... (shared secrets file with NVIDIA)
+    """
+    env_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if env_key:
+        return env_key
+
+    oai_path = PROJECT_ROOT / "openai_api_key.txt"
+    if oai_path.exists():
+        text = oai_path.read_text(encoding="utf-8")
+        parsed = _parse_key_file(text)
+        key = (parsed.get("OPENAI_API_KEY") or text.strip()).strip()
+        if key and key != "PASTE_YOUR_API_KEY_HERE":
+            return key
+
+    shared = PROJECT_ROOT / "api_key.txt"
+    if shared.exists():
+        text = shared.read_text(encoding="utf-8")
+        parsed = _parse_key_file(text)
+        key = (parsed.get("OPENAI_API_KEY") or "").strip()
+        if key and key != "PASTE_YOUR_API_KEY_HERE":
+            return key
+
+    raise ValueError(
+        "OpenAI API key not found: set OPENAI_API_KEY, or create openai_api_key.txt, "
+        "or add OPENAI_API_KEY=... to api_key.txt"
+    )
+
+
 def _read_llm_backend_from_file() -> str | None:
     """First non-empty, non-comment line from project-root llm_backend.txt."""
     path = PROJECT_ROOT / LLM_BACKEND_FILE
@@ -182,7 +215,7 @@ def _call_openai_llm(
     max_retries: int,
     timeout: int | float,
 ) -> str:
-    api_key = _load_api_key(env_var="OPENAI_API_KEY", key_filename="openai_api_key.txt")
+    api_key = _load_openai_api_key()
 
     max_retries = int(os.getenv("OPENAI_MAX_RETRIES", str(max_retries)))
     max_tokens = _step_max_tokens(step_name, int(os.getenv("OPENAI_MAX_TOKENS", "2048")))

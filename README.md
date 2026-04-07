@@ -184,11 +184,13 @@ Reference copy: **`llm_backend.example.txt`** (you can duplicate it to `llm_back
 
 **OpenAI** (when backend is `openai`):
 
-- Set **`OPENAI_API_KEY`**, or put the key in **`openai_api_key.txt`**, or add a line to **`api_key.txt`**:
+- Set **`OPENAI_API_KEY`**, or put the key in **`openai_api_key.txt`** (one line, bare `sk-...`), or add a line to **`api_key.txt`**:
 
 ```text
 OPENAI_API_KEY=sk-...
 ```
+
+If more than one source is set, **only one is used** (no merge): **`OPENAI_API_KEY` env → `openai_api_key.txt` → `api_key.txt`** with `OPENAI_API_KEY=...`. Same key in two places does not cause errors; the first in that order wins.
 
 **Both backends in one `api_key.txt` (optional):**
 
