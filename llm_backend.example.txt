@@ -1,4 +1,6 @@
-# Copy to llm_backend.txt and keep a single active line (or delete comments).
-# qwen  = NVIDIA Build API with Qwen models (default)
-# openai = OpenAI Chat Completions API
-qwen
+# Global default: backend, optional model (first non-comment line)
+qwen qwen/qwen2.5-7b-instruct
+
+# Optional: per-step overrides — must match step_name in code
+# generate_response = openai gpt-5_4-mini-2026-03-17
+# plot_summary_generation = qwen qwen/qwen3.5-397b-a17b

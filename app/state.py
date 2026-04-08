@@ -23,7 +23,6 @@ from app.navigation_runtime import (
     update_plot_guidance_state,
 )
 
-PROGRESSION_MODEL = "qwen/qwen3.5-397b-a17b"
 INTENT_ALIGNMENTS = {"target_choice", "current_plot", "off_topic"}
 TURN_STATE_BEAT_STATUSES = {"open", "wrapped", "exhausted"}
 
@@ -1178,7 +1177,6 @@ def classify_player_alignment(
     try:
         llm_raw = call_nvidia_llm(
             prompt,
-            model=PROGRESSION_MODEL,
             step_name="player_alignment_classification",
             allow_env_override=False,
         )
@@ -1279,7 +1277,6 @@ def extract_turn_state(
     try:
         llm_raw = call_nvidia_llm(
             prompt,
-            model=PROGRESSION_MODEL,
             step_name="turn_state_extraction",
             allow_env_override=False,
         )
@@ -1514,7 +1511,6 @@ def evaluate_plot_completion(
     try:
         llm_raw = call_nvidia_llm(
             llm_prompt,
-            model=PROGRESSION_MODEL,
             step_name="plot_completion_evaluation",
             allow_env_override=False,
         )

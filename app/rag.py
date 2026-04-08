@@ -53,7 +53,7 @@ Recent Conversation:
 """
 
     try:
-        response = call_nvidia_llm(prompt)
+        response = call_nvidia_llm(prompt, step_name="generate_retrieval_queries")
     except Exception:
         response = ""
 

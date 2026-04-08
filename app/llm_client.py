@@ -171,19 +171,6 @@ def _load_openai_api_key() -> str:
     )
 
 
-def _read_llm_backend_from_file() -> str | None:
-    """First non-empty, non-comment line from project-root llm_backend.txt."""
-    path = PROJECT_ROOT / LLM_BACKEND_FILE
-    if not path.exists():
-        return None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        return line
-    return None
-
-
 def _parse_backend_line(raw: str) -> tuple[str, str | None]:
     """
     Parse llm_backend.txt line.
@@ -204,36 +191,112 @@ def _parse_backend_line(raw: str) -> tuple[str, str | None]:
     return backend, (model or None)
 
 
-def _normalize_provider(provider: str | None) -> str:
-    """
-    Resolve backend: explicit arg > LLM_PROVIDER env > llm_backend.txt > default qwen (NVIDIA/Qwen).
-    File/env may use qwen | nvidia | openai (aliases documented in README).
-    """
-    raw = (provider or "").strip() if provider is not None else ""
-    if not raw:
-        raw = (os.getenv("LLM_PROVIDER") or "").strip()
-    if not raw:
-        raw = _read_llm_backend_from_file() or ""
-    if not raw:
-        raw = "qwen"
-    key, _ = _parse_backend_line(raw)
+def _backend_alias_to_provider(token: str) -> str:
+    key = (token or "").strip().lower()
     if key in {"qwen", "nvidia", "nv"}:
         return "nvidia"
     if key in {"openai", "oai"}:
         return "openai"
     raise ValueError(
-        f"Unsupported LLM backend {raw!r}. Use qwen (NVIDIA), nvidia, or openai "
+        f"Unsupported LLM backend token {token!r}. Use qwen (NVIDIA), nvidia, or openai "
         f"(see {LLM_BACKEND_FILE} or LLM_PROVIDER)."
     )
 
 
-def _model_from_file_for(provider: str) -> str | None:
-    raw = _read_llm_backend_from_file() or ""
-    backend, model = _parse_backend_line(raw)
-    if not backend or not model:
-        return None
-    normalized = _normalize_provider(backend)
-    return model if normalized == provider else None
+def _parse_llm_backend_file() -> tuple[str, dict[str, str]]:
+    """
+    Parse project-root llm_backend.txt.
+
+    - First non-comment line: global default (backend, optional model).
+    - Further lines: ``step_name = backend ...`` per-step override (backend + optional model).
+
+    Lines without ``=`` after the first are ignored (backward compatible single-line files).
+    """
+    path = PROJECT_ROOT / LLM_BACKEND_FILE
+    if not path.exists():
+        return "qwen", {}
+    raw_lines: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        raw_lines.append(s)
+    if not raw_lines:
+        return "qwen", {}
+    global_line = raw_lines[0]
+    steps: dict[str, str] = {}
+    for line in raw_lines[1:]:
+        if "=" not in line:
+            continue
+        left, right = line.split("=", 1)
+        step = left.strip()
+        rest = right.strip()
+        if step and rest:
+            steps[step] = rest
+    return global_line, steps
+
+
+def _resolve_provider(
+    explicit_provider: str | None,
+    step_name: str,
+    global_line: str,
+    step_map: dict[str, str],
+) -> str:
+    """Priority: explicit provider > LLM_PROVIDER env > per-step line > global first line > qwen."""
+    if explicit_provider is not None and str(explicit_provider).strip():
+        backend_token, _ = _parse_backend_line(str(explicit_provider).strip())
+        return _backend_alias_to_provider(backend_token)
+    env_p = (os.getenv("LLM_PROVIDER") or "").strip()
+    if env_p:
+        backend_token, _ = _parse_backend_line(env_p)
+        return _backend_alias_to_provider(backend_token)
+    sk = (step_name or "").strip()
+    if sk and sk in step_map:
+        backend_token, _ = _parse_backend_line(step_map[sk])
+        return _backend_alias_to_provider(backend_token)
+    if global_line:
+        backend_token, _ = _parse_backend_line(global_line)
+        return _backend_alias_to_provider(backend_token)
+    return "nvidia"
+
+
+def _resolve_model(
+    provider: str,
+    explicit_model: str | None,
+    step_name: str,
+    global_line: str,
+    step_map: dict[str, str],
+) -> str:
+    """
+    Priority: explicit model > NVIDIA_MODEL / OPENAI_MODEL env > per-step model (if step backend matches)
+    > global model (if global backend matches) > code default.
+    """
+    if explicit_model is not None and str(explicit_model).strip():
+        return str(explicit_model).strip()
+    env_var = "NVIDIA_MODEL" if provider == "nvidia" else "OPENAI_MODEL"
+    env_m = (os.getenv(env_var) or "").strip()
+    if env_m:
+        return env_m
+    sk = (step_name or "").strip()
+    if sk and sk in step_map:
+        b, m = _parse_backend_line(step_map[sk])
+        if _backend_alias_to_provider(b) == provider and m:
+            return m
+    gb, gm = _parse_backend_line(global_line or "")
+    if global_line and _backend_alias_to_provider(gb) == provider and gm:
+        return gm
+    return NVIDIA_DEFAULT_MODEL if provider == "nvidia" else OPENAI_DEFAULT_MODEL
+
+
+def _resolve_provider_and_model(
+    explicit_provider: str | None,
+    explicit_model: str | None,
+    step_name: str,
+) -> tuple[str, str]:
+    g_line, step_map = _parse_llm_backend_file()
+    provider = _resolve_provider(explicit_provider, step_name, g_line, step_map)
+    model = _resolve_model(provider, explicit_model, step_name, g_line, step_map)
+    return provider, model
 
 
 def _call_openai_llm(
@@ -511,10 +574,8 @@ def call_llm(
     max_retries: int = 3,
     timeout: int | float = 120,
 ) -> str:
-    provider = _normalize_provider(provider)
+    provider, model = _resolve_provider_and_model(provider, model, step_name)
     if provider == "nvidia":
-        if model is None:
-            model = os.getenv("NVIDIA_MODEL") or _model_from_file_for("nvidia") or NVIDIA_DEFAULT_MODEL
         return _call_nvidia_llm(
             prompt,
             model,
@@ -523,8 +584,6 @@ def call_llm(
             timeout=timeout,
         )
 
-    if model is None:
-        model = os.getenv("OPENAI_MODEL") or _model_from_file_for("openai") or OPENAI_DEFAULT_MODEL
     return _call_openai_llm(
         prompt,
         model,
@@ -549,7 +608,8 @@ def call_nvidia_llm(
     # Kept for compatibility with older call sites that pass allow_env_override.
     # If False, we avoid overriding the user-supplied model via *_MODEL env vars.
     if not allow_env_override and model is not None:
-        if _normalize_provider(None) == "nvidia":
+        resolved, _ = _resolve_provider_and_model(None, None, step_name)
+        if resolved == "nvidia":
             os.environ.pop("NVIDIA_MODEL", None)
         else:
             os.environ.pop("OPENAI_MODEL", None)

@@ -183,7 +183,23 @@ openai
 
 Reference copy: **`llm_backend.example.txt`** (you can duplicate it to `llm_backend.txt` if needed).
 
-**Override (optional):** for CI or one-off runs, set environment variable `LLM_PROVIDER` to `qwen`, `nvidia`, or `openai`. It takes precedence over `llm_backend.txt`.
+**Per-step backend and model (optional):** after the first line, add rows of the form `step_name = backend ...model...`. The `step_name` must match the `step_name` string used in code (for example `generate_response`, `check_whether_roll_dice`, `plot_summary_generation`). This lets different pipeline steps use different providers or model IDs without editing Python.
+
+```text
+qwen qwen/qwen2.5-7b-instruct
+
+generate_response = openai gpt-5_4-mini-2026-03-17
+plot_summary_generation = qwen qwen/qwen3.5-397b-a17b
+```
+
+Resolution order:
+
+- **Provider:** explicit `call_llm(..., provider=...)` → `LLM_PROVIDER` env → per-step line → global first line → default `qwen`.
+- **Model:** explicit `call_llm(..., model=...)` → `NVIDIA_MODEL` / `OPENAI_MODEL` env → per-step line (only if that line’s backend matches the resolved provider) → global first line (if its backend matches) → built-in default.
+
+Common `step_name` values include: `generate_response`, `check_whether_roll_dice`, `scene_opening_generation`, `plot_summary_generation`, `scene_summary_generation`, `generate_retrieval_queries`, `player_alignment_classification`, `turn_state_extraction`, `plot_completion_evaluation`, and `generation` for generic calls.
+
+**Override (optional):** for CI or one-off runs, set environment variable `LLM_PROVIDER` to `qwen`, `nvidia`, or `openai`. It takes precedence over per-step and global lines in `llm_backend.txt`.
 
 ### 2) API keys
 
