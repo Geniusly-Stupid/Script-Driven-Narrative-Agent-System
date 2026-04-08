@@ -95,7 +95,6 @@ def _mock_pdf_llm(prompt: str) -> str:
                         "plots": [
                             {
                                 "plot_goal": "Collect witness account",
-                                "mandatory_events": ["Interview witness"],
                                 "npc": ["Militia Liaison"],
                                 "locations": ["Town Square"],
                                 "source_page_start": 3,
@@ -113,7 +112,6 @@ def _mock_pdf_llm(prompt: str) -> str:
                         "plots": [
                             {
                                 "plot_goal": "Travel to river road",
-                                "mandatory_events": ["Leave square"],
                                 "npc": [],
                                 "locations": ["Road"],
                                 "source_page_start": 6,
@@ -133,7 +131,6 @@ def _mock_pdf_llm(prompt: str) -> str:
                 "plots": [
                     {
                         "plot_goal": "Interview locals and collect baseline testimony",
-                        "mandatory_events": ["Interview witness", "Cross-check statements"],
                         "npc": ["Militia Liaison", "Vendor"],
                         "locations": ["Town Square"],
                         "source_page_start": 3,
@@ -141,7 +138,6 @@ def _mock_pdf_llm(prompt: str) -> str:
                     },
                     {
                         "plot_goal": "Follow contradictions toward river lead",
-                        "mandatory_events": ["Spot conflicting clue", "Choose route"],
                         "npc": ["Vendor"],
                         "locations": ["Square Exit"],
                         "source_page_start": 5,
@@ -236,7 +232,6 @@ def _mock_markdown_llm(prompt: str) -> str:
                     {
                         "plot_index": idx,
                         "plot_goal": f"{scene_heading.title()} plot {idx}",
-                        "mandatory_events": [f"Event {idx}"],
                         "npc": [],
                         "locations": [],
                     }

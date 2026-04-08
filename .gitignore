@@ -23,6 +23,7 @@ narrative.db
 # Local secrets
 api_key.txt
 openai_api_key.txt
+llm_backend.txt
 
 # OS files
 .DS_Store

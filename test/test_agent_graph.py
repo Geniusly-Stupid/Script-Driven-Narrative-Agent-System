@@ -112,7 +112,6 @@ def _make_scene(
             {
                 'plot_id': f'{scene_id}_plot_1',
                 'plot_goal': scene_goal,
-                'mandatory_events': [],
                 'npc': [],
                 'locations': [],
                 'raw_text': scene_goal,

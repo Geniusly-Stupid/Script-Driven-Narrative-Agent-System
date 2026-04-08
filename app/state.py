@@ -758,10 +758,7 @@ def _current_scene_boundary_summary(scene_goal: str, scene_description: str, cur
     return "\n".join(parts) or "Use the current scene goal and plot excerpt as the scope boundary."
 
 
-def _objective_checklist_summary(plot_goal: str, mandatory_events: list[str]) -> str:
-    if mandatory_events:
-        lines = [f"- {event}" for event in mandatory_events if str(event).strip()]
-        return "\n".join(lines) or f"- Advance the current plot goal: {plot_goal or 'current plot'}"
+def _objective_checklist_summary(plot_goal: str) -> str:
     return f"- Advance the current plot goal: {plot_goal or 'current plot'}"
 
 
@@ -785,13 +782,9 @@ def _plot_exit_conditions_summary(
     return "\n".join(lines)
 
 
-def _completion_signals_summary(plot_goal: str, mandatory_events: list[str]) -> str:
+def _completion_signals_summary(plot_goal: str) -> str:
     lines = [f"- The plot should advance toward: {plot_goal or 'the current objective'}"]
-    if mandatory_events:
-        lines.append("- Strong completion signals include covering these beats:")
-        lines.extend([f"  - {event}" for event in mandatory_events if str(event).strip()])
-    else:
-        lines.append("- Strong completion signals include resolving the current investigation beat in-scene.")
+    lines.append("- Strong completion signals include resolving the current investigation beat in-scene.")
     return "\n".join(lines)
 
 
@@ -871,7 +864,6 @@ def _build_eval_context(
     indirect_targets_via_return: list[dict[str, Any]] | None = None,
     remaining_required_targets: list[dict[str, Any]] | None = None,
     return_target: dict[str, Any] | None = None,
-    mandatory_events: list[str] | None = None,
     redirect_streak: int = 0,
     latest_agent_turn_excerpt: str = "",
     latest_turn_state: dict[str, Any] | None = None,
@@ -883,7 +875,6 @@ def _build_eval_context(
     indirect_targets_via_return = deepcopy(indirect_targets_via_return or [])
     remaining_required_targets = deepcopy(remaining_required_targets or [])
     return_target = deepcopy(return_target or {})
-    mandatory_events = list(mandatory_events or [])
     legal_targets = _legal_targets(allowed_targets, indirect_targets_via_return)
     latest_turn_state = _normalize_turn_state(
         latest_turn_state,
@@ -898,7 +889,6 @@ def _build_eval_context(
         scene_goal=scene_goal,
         scene_description=scene_description,
         current_plot_raw_text=current_plot_raw_text,
-        mandatory_events=mandatory_events,
         allowed_targets=allowed_targets,
         indirect_targets_via_return=indirect_targets_via_return,
         remaining_required_targets=remaining_required_targets,
@@ -931,7 +921,6 @@ def _build_eval_context(
         "indirect_targets_via_return": indirect_targets_via_return,
         "remaining_required_targets": remaining_required_targets,
         "return_target": return_target,
-        "mandatory_events": mandatory_events,
         "redirect_streak": int(redirect_streak),
         "latest_agent_turn_excerpt": latest_agent_turn_excerpt,
         "latest_turn_state": latest_turn_state,
@@ -952,8 +941,8 @@ def _build_eval_context(
             scene_description,
             current_plot_raw_text,
         ),
-        "objective_checklist_summary": _objective_checklist_summary(plot_goal, mandatory_events),
-        "completion_signals_summary": _completion_signals_summary(plot_goal, mandatory_events),
+        "objective_checklist_summary": _objective_checklist_summary(plot_goal),
+        "completion_signals_summary": _completion_signals_summary(plot_goal),
         "plot_exit_conditions_summary": plot_exit_conditions_summary,
     }
 
@@ -1013,9 +1002,6 @@ Indirect Targets Via Return:
 Remaining Required Targets:
 {_target_lines(ctx['remaining_required_targets'])}
 
-Mandatory Events:
-{ctx['mandatory_events']}
-
 Redirect State:
 redirect_streak={ctx['redirect_streak']}
 
@@ -1058,7 +1044,6 @@ Rules:
 - If the current beat is resolved or intentionally wrapped, you may set close_current=true.
 - For hubs, do not close the current node without an explicit legal branch or exit choice.
 - If the player is off-topic, keep action=stay and close_current=false.
-- Use Mandatory Events as evidence, not as hard requirements.
 - Keep output strict JSON.
 
 Current Node Kind:
@@ -1100,9 +1085,6 @@ Indirect Targets Via Return:
 Remaining Required Targets:
 {_target_lines(ctx['remaining_required_targets'])}
 
-Mandatory Events:
-{ctx['mandatory_events']}
-
 Latest Turn State:
 {ctx['latest_turn_state_summary']}
 
@@ -1125,7 +1107,6 @@ def classify_player_alignment(
     scene_goal: str = "",
     scene_description: str = "",
     current_plot_raw_text: str = "",
-    mandatory_events: list[str] | None = None,
     allowed_targets: list[dict[str, Any]] | None = None,
     indirect_targets_via_return: list[dict[str, Any]] | None = None,
     remaining_required_targets: list[dict[str, Any]] | None = None,
@@ -1164,7 +1145,6 @@ def classify_player_alignment(
         "eligible_targets": _eligible_targets(allowed_targets),
         "eligible_indirect_targets": _eligible_targets(indirect_targets_via_return),
         "remaining_required_targets": deepcopy(remaining_required_targets or []),
-        "mandatory_events": list(mandatory_events or []),
         "redirect_streak": int(redirect_streak),
         "latest_turn_state_summary": _turn_state_summary(latest_turn_state),
         "latest_agent_turn_excerpt": latest_agent_turn_excerpt,
@@ -1300,7 +1280,6 @@ def story_position_context(
     scenes, scene_map, plot_map = _story_graph(db)
     current_scene = scene_map.get(current_scene_id, {})
     current_plot = plot_map.get(current_plot_id, {})
-    mandatory_events = list(current_plot.get("mandatory_events", []) or [])
 
     current_node = current_plot or current_scene
     current_navigation = normalize_navigation(current_node.get("navigation"))
@@ -1403,8 +1382,8 @@ def story_position_context(
         and bool(eligible_targets)
     )
     active_plot_objective = str(current_plot.get("plot_goal", "")) or str(current_scene.get("scene_goal", ""))
-    objective_checklist_summary = _objective_checklist_summary(active_plot_objective, mandatory_events)
-    completion_signals_summary = _completion_signals_summary(active_plot_objective, mandatory_events)
+    objective_checklist_summary = _objective_checklist_summary(active_plot_objective)
+    completion_signals_summary = _completion_signals_summary(active_plot_objective)
     plot_exit_conditions_summary = _plot_exit_conditions_summary(
         current_node_kind=str(current_node.get("node_kind", "linear")),
         allowed_targets=allowed_targets,
@@ -1470,7 +1449,6 @@ def evaluate_plot_completion(
     user_input: str,
     response: str,
     current_progress: float,
-    mandatory_events: list[str],
     *,
     plot_goal: str = "",
     scene_goal: str = "",
@@ -1497,7 +1475,6 @@ def evaluate_plot_completion(
         allowed_targets=allowed_targets,
         indirect_targets_via_return=indirect_targets_via_return,
         remaining_required_targets=remaining_required_targets,
-        mandatory_events=mandatory_events,
         redirect_streak=redirect_streak,
         latest_agent_turn_excerpt=latest_agent_turn_excerpt,
         latest_turn_state=latest_turn_state,
@@ -1616,7 +1593,6 @@ def evaluate_pre_response_transition(
     indirect_targets_via_return: list[dict[str, Any]] | None = None,
     remaining_required_targets: list[dict[str, Any]] | None = None,
     return_target: dict[str, Any] | None = None,
-    mandatory_events: list[str] | None = None,
     redirect_streak: int = 0,
     latest_agent_turn_excerpt: str = "",
     latest_turn_state: dict[str, Any] | None = None,
@@ -1639,7 +1615,6 @@ def evaluate_pre_response_transition(
         indirect_targets_via_return=indirect_targets_via_return,
         remaining_required_targets=remaining_required_targets,
         return_target=return_target,
-        mandatory_events=mandatory_events,
         redirect_streak=redirect_streak,
         latest_agent_turn_excerpt=latest_agent_turn_excerpt,
         latest_turn_state=latest_turn_state,

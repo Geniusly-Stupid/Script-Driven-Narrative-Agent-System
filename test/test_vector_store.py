@@ -22,7 +22,6 @@ def main() -> int:
                         'plot_id': 'p1',
                         'npc': ['Archivist'],
                         'locations': ['Temple'],
-                        'mandatory_events': ['Find the map'],
                     }
                 ],
             }

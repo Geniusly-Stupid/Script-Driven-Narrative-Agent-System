@@ -43,7 +43,6 @@ def _build_agent(db_name: str, chroma_name: str) -> tuple[NarrativeAgent, Databa
                 {
                     'plot_id': 'scene_1_plot_1',
                     'plot_goal': 'Find the source of the disturbance',
-                    'mandatory_events': ['Inspect the archive shelves'],
                     'npc': ['Archivist'],
                     'locations': ['Library'],
                     'status': 'in_progress',

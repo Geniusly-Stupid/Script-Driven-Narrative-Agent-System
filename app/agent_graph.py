@@ -169,9 +169,6 @@ Current Plot Excerpt:
 Scene Entry Turn:
 {scene_entry_turn}
 
-Mandatory Events (if any):
-{mandatory_events}
-
 ---
 
 # MEMORY
@@ -213,12 +210,6 @@ Items / Clues:
 ---
 
 # INTERNAL STATE
-
-Plot Progress:
-{plot_progress_percentage_or_state}
-
-Scene Progress:
-{scene_progress_percentage_or_state}
 
 Active Plot Objective:
 {active_plot_objective}
@@ -370,9 +361,6 @@ Plot Goal:
 Current Plot Excerpt:
 {current_plot_excerpt}
 
-Mandatory Events:
-{mandatory_events}
-
 Previous Plot Summary:
 {previous_plot_summary}
 
@@ -490,7 +478,6 @@ class NarrativeState(TypedDict, total=False):
     next_scene_plot_goal: str
     next_scene_plot_excerpt: str
     latest_turn_text: str
-    mandatory_events: list[str]
     previous_plot_summary: str
     current_scene_summary: str
     plot_advance_action: str
@@ -580,7 +567,6 @@ class NarrativeAgent:
             'conversation_history': [],
             'global_conversation_history': [],
             'retrieved_docs': [],
-            'mandatory_events': [],
             'current_plot_raw_text': '',
             'scene_entry_turn': False,
             'current_navigation': {},
@@ -688,7 +674,6 @@ class NarrativeAgent:
             'conversation_history': [],
             'global_conversation_history': [],
             'retrieved_docs': [],
-            'mandatory_events': [],
             'current_plot_raw_text': '',
             'scene_entry_turn': False,
             'current_navigation': {},
@@ -868,32 +853,6 @@ class NarrativeAgent:
             lines.append(f"Player: {user_text}")
             lines.append(f"Keeper: {keeper_text}")
         return '\n'.join(lines)
-
-    def _trim_disallowed_opening_choice(self, text: str) -> str:
-        response = (text or '').strip()
-        if not response:
-            return response
-        match = re.search(r'[\(\（]([^\)\）]{0,260})[\)\）]\s*$', response, flags=re.DOTALL)
-        if not match:
-            return response
-        choice_text = match.group(1)
-        normalized = choice_text.lower()
-        markers = (
-            'choose',
-            'option',
-            'would you',
-            'which do you',
-            'what do you do next',
-            '还是',
-            '请选择',
-            '你要先',
-            '你会先',
-            '你打算',
-            '可不可以先',
-        )
-        if any(marker in normalized for marker in markers):
-            return response[: match.start()].rstrip()
-        return response
 
     def _target_descriptor(self, target_kind: str, target_id: str) -> str:
         if not target_kind or not target_id:
@@ -1161,7 +1120,6 @@ class NarrativeAgent:
             for i, plot in enumerate(plots):
                 if plot['plot_id'] == state['plot_id']:
                     state['plot_goal'] = plot.get('plot_goal', '')
-                    state['mandatory_events'] = plot.get('mandatory_events', [])
                     if i > 0:
                         prev_plot = plots[i - 1]['plot_id']
                         state['previous_plot_summary'] = self.db.get_summary('plot', scene_id=state['scene_id'], plot_id=prev_plot)
@@ -1177,7 +1135,6 @@ class NarrativeAgent:
                 scene_goal=state.get('scene_goal', ''),
                 scene_description=state.get('scene_description', ''),
                 current_plot_raw_text=state.get('current_plot_raw_text', ''),
-                mandatory_events=state.get('mandatory_events', []),
                 allowed_targets=state.get('allowed_targets', []),
                 indirect_targets_via_return=state.get('indirect_targets_via_return', []),
                 remaining_required_targets=state.get('remaining_required_targets', []),
@@ -1238,7 +1195,6 @@ class NarrativeAgent:
             indirect_targets_via_return=state.get('indirect_targets_via_return', []),
             remaining_required_targets=state.get('remaining_required_targets', []),
             return_target=state.get('return_target'),
-            mandatory_events=state.get('mandatory_events', []),
             redirect_streak=int(state.get('redirect_streak', 0) or 0),
             latest_agent_turn_excerpt=state.get('latest_agent_turn_excerpt', ''),
             latest_turn_state=state.get('latest_turn_state', {}),
@@ -1393,7 +1349,6 @@ class NarrativeAgent:
         state['retrieval_queries'] = generate_retrieval_queries(
             state.get('effective_user_input', state.get('latest_user_input', '')),
             state.get('plot_goal', ''),
-            state.get('mandatory_events', []),
             state.get('conversation_history', []),
         )
         return state
@@ -1408,7 +1363,7 @@ class NarrativeAgent:
     def construct_context(self, state: NarrativeState) -> NarrativeState:
         categorized = categorize_docs(state.get('retrieved_docs', []))
         player_skill_list = self._format_player_skill_list(state)
-        recent_conversation = self._format_recent_conversation(state, rounds=3)
+        recent_conversation = self._format_recent_conversation(state, rounds=2, history_key='global_conversation_history')
         state['roll_check_prompt'] = ROLL_CHECK_PROMPT_TEMPLATE.format(
             user_input=state.get('effective_user_input', state.get('latest_user_input', '')),
             scene_id=state.get('scene_id', ''),
@@ -1417,7 +1372,6 @@ class NarrativeAgent:
             current_scene_description=state.get('scene_description', '') or 'None',
             current_plot_goal=state.get('plot_goal', '') or 'None',
             current_plot_excerpt=state.get('current_plot_raw_text', '') or 'None',
-            mandatory_events=', '.join(state.get('mandatory_events', [])) or 'None',
             previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
             current_scene_summary=state.get('current_scene_summary', '') or 'None',
             recent_conversation=recent_conversation,
@@ -1507,7 +1461,6 @@ class NarrativeAgent:
                 current_plot_goal=state.get('plot_goal', '') or 'None',
                 current_plot_excerpt=state.get('current_plot_raw_text', '') or 'None',
                 scene_entry_turn='true' if state.get('scene_entry_turn') else 'false',
-                mandatory_events=', '.join(state.get('mandatory_events', [])) or 'None',
                 previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
                 current_scene_summary=state.get('current_scene_summary', '') or 'None',
                 recent_conversation=recent_conversation,
@@ -1518,8 +1471,6 @@ class NarrativeAgent:
                 world_context_info=categorized['world_context_info'],
                 truth_related_info=categorized['truth_related_info'],
                 item_or_clue_info=categorized['item_or_clue_info'],
-                plot_progress_percentage_or_state=f"{state.get('plot_progress', 0.0):.0%}",
-                scene_progress_percentage_or_state=f"{state.get('scene_progress', 0.0):.0%}",
                 active_plot_objective=state.get('active_plot_objective', '') or 'None',
                 objective_checklist_summary=state.get('objective_checklist_summary', 'None'),
                 completion_signals_summary=state.get('completion_signals_summary', 'None'),
@@ -1554,8 +1505,6 @@ class NarrativeAgent:
             state['response'] = self._llm_call(state['prompt'], step_name='generate_response')
             if state.get('resolved_check_summary'):
                 state['response'] = self._trim_redundant_check_request(state.get('response', ''))
-            if state.get('scene_entry_turn') and not (state.get('effective_user_input', state.get('latest_user_input', '')) or '').strip() and not bool(state.get('opening_choice_allowed', False)):
-                state['response'] = self._trim_disallowed_opening_choice(state.get('response', ''))
         except Exception as e:
             logger.error("LLM error in generate_response prompt_length=%s error=%s", len(state.get('prompt', '')), e)
             print("LLM error:", e)
@@ -1591,7 +1540,6 @@ class NarrativeAgent:
             state['latest_user_input'],
             state['response'],
             state.get('plot_progress', 0.0),
-            state.get('mandatory_events', []),
             plot_goal=state.get('plot_goal', ''),
             scene_goal=state.get('scene_goal', ''),
             scene_description=state.get('scene_description', ''),
@@ -1948,7 +1896,6 @@ Scene Description: {scene.get('scene_description', '')}
 Plot ID: {plot_id}
 Plot Goal: {plot.get('plot_goal', '')}
 Current Plot Excerpt: {plot_excerpt}
-Mandatory Events: {plot.get('mandatory_events', [])}
 Player Profile: {self.db.get_player_profile()}
 Previous Scene Summary: {previous_scene_summary or 'None'}
 Latest Transition Context: {transition_context_summary}
@@ -1959,8 +1906,6 @@ Opening Choice Allowed: {str(opening_choice_allowed).lower()}
         try:
             result = self._llm_call(prompt, step_name='scene_opening_generation')
             if result:
-                if not opening_choice_allowed:
-                    return self._trim_disallowed_opening_choice(result)
                 return result
         except Exception:
             pass
@@ -2001,7 +1946,6 @@ Requirements:
 Scene: {state.get('scene_id', '')}
 Plot: {state.get('plot_id', '')}
 Plot Goal: {state.get('plot_goal', '')}
-Mandatory Events: {state.get('mandatory_events', [])}
 Plot Advance Action: {state.get('plot_advance_action', 'stay')}
 Plot Advance Target: {transition_label}
 Close Current Plot: {str(bool(state.get('plot_advance_close_current', False))).lower()}
@@ -2030,7 +1974,6 @@ Recent History:
             pass
         bullets = [
             f"- Plot goal: {state.get('plot_goal', 'None')}",
-            f"- Mandatory events or cues: {', '.join(state.get('mandatory_events', [])) or 'None recorded'}",
             f"- Transition decision: {state.get('plot_advance_action', 'stay')} -> {transition_label} ({state.get('plot_advance_reason', 'no explicit reason')})",
             f"- Close current plot: {bool(state.get('plot_advance_close_current', False))}",
             f"- Latest player action: {state.get('latest_user_input', '') or 'None'}",

@@ -55,7 +55,6 @@ def main() -> int:
                         {
                             "plot_id": "scene_1_plot_1",
                             "plot_goal": "First beat",
-                            "mandatory_events": ["Event A"],
                             "npc": ["Thomas"],
                             "locations": ["House"],
                             "raw_text": "Line 10\nLine 11\nLine 12",
@@ -86,7 +85,6 @@ def main() -> int:
                         {
                             "plot_id": "scene_1_plot_2",
                             "plot_goal": "Second beat",
-                            "mandatory_events": ["Event B"],
                             "npc": ["Jefferson"],
                             "locations": ["Cemetery"],
                             "raw_text": "Line 13\nLine 14",

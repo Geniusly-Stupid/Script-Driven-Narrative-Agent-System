@@ -29,7 +29,6 @@ def _build_db(db_path: Path) -> Database:
                     {
                         'plot_id': 'scene_t1_plot_1',
                         'plot_goal': 'Inspect the room.',
-                        'mandatory_events': [],
                         'npc': [],
                         'locations': [],
                         'raw_text': 'A quiet room with scattered notes.',

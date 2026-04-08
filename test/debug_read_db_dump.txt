@@ -104,7 +104,6 @@ OUTPUT TXT: D:\umich\699\Script-Driven-Narrative-Agent-System\test\debug_read_db
   "line_start": 10,
   "line_end": 12,
   "line_count": 3,
-  "mandatory_events": [
     "Event A"
   ],
   "npc": [
@@ -143,7 +142,6 @@ OUTPUT TXT: D:\umich\699\Script-Driven-Narrative-Agent-System\test\debug_read_db
   "line_start": 13,
   "line_end": 14,
   "line_count": 2,
-  "mandatory_events": [
     "Event B"
   ],
   "npc": [

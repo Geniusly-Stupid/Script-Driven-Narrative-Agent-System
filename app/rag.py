@@ -8,11 +8,9 @@ from app.llm_client import call_nvidia_llm
 def generate_retrieval_queries(
     user_input: str,
     plot_goal: str,
-    mandatory_events: list[str],
     conversation_history: list[dict],
 ) -> list[str]:
     history_tail = "\n".join(turn.get("user", "") for turn in conversation_history[-4:])
-    events_text = "\n".join(mandatory_events[:5])
 
     prompt = f"""
 You are a narrative retrieval planner.
@@ -22,7 +20,6 @@ Your task is to generate retrieval queries for a story-driven RAG system.
 Given:
 - The current user input
 - The current plot goal
-- Mandatory upcoming events
 - Recent conversation history
 
 You must output a JSON object in the following format:
@@ -44,9 +41,6 @@ User Input:
 
 Plot Goal:
 {plot_goal}
-
-Mandatory Events:
-{events_text}
 
 Recent Conversation:
 {history_tail}

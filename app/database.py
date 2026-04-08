@@ -39,7 +39,6 @@ class Database:
                 plot_id TEXT PRIMARY KEY,
                 scene_id TEXT NOT NULL,
                 plot_goal TEXT NOT NULL,
-                mandatory_events TEXT NOT NULL,
                 npc TEXT NOT NULL,
                 locations TEXT NOT NULL,
                 raw_text TEXT NOT NULL DEFAULT '',
@@ -261,7 +260,6 @@ class Database:
                         plot_id,
                         scene_id,
                         plot_goal,
-                        mandatory_events,
                         npc,
                         locations,
                         raw_text,
@@ -271,13 +269,12 @@ class Database:
                         navigation_json,
                         source_page_start,
                         source_page_end
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''',
                     (
                         plot['plot_id'],
                         scene['scene_id'],
                         plot['plot_goal'],
-                        json.dumps(plot.get('mandatory_events', []), ensure_ascii=False),
                         json.dumps(plot.get('npc', []), ensure_ascii=False),
                         json.dumps(plot.get('locations', []), ensure_ascii=False),
                         plot.get('raw_text', ''),
@@ -367,7 +364,6 @@ class Database:
         plots = []
         for row in rows:
             p = self._hydrate_plot_row(dict(row))
-            p['mandatory_events'] = json.loads(p['mandatory_events'])
             p['npc'] = json.loads(p['npc'])
             p['locations'] = json.loads(p['locations'])
             plots.append(p)
@@ -379,7 +375,6 @@ class Database:
         if not row:
             return None
         p = self._hydrate_plot_row(dict(row))
-        p['mandatory_events'] = json.loads(p['mandatory_events'])
         p['npc'] = json.loads(p['npc'])
         p['locations'] = json.loads(p['locations'])
         return p

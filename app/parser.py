@@ -502,7 +502,6 @@ def _normalize_story_scenes(
             raw_plots = [
                 {
                     "plot_goal": scene_goal,
-                    "mandatory_events": [],
                     "npc": [],
                     "locations": [],
                     "source_page_start": source_start,
@@ -556,7 +555,6 @@ def _normalize_story_scenes(
                 {
                     "plot_id": plot_id,
                     "plot_goal": _coerce_text(raw_plot.get("plot_goal"), f"Progress {scene_id} plot {p_idx}"),
-                    "mandatory_events": _coerce_list(raw_plot.get("mandatory_events")),
                     "npc": _coerce_list(raw_plot.get("npc")),
                     "locations": _coerce_list(raw_plot.get("locations")),
                     "raw_text": _slice_document_text(document, p_default_start, p_default_end),
@@ -1403,7 +1401,6 @@ def _fallback_scene_metadata(scene: MarkdownSceneCandidate, plot_spans: list[dic
             {
                 "plot_index": idx,
                 "plot_goal": plot_span.get("title") or f"{scene_goal} plot {idx}",
-                "mandatory_events": [],
                 "npc": [],
                 "locations": [],
             }
@@ -1427,7 +1424,6 @@ def _assemble_markdown_scene(
             {
                 "plot_id": f"{scene_id}_plot_{idx}",
                 "plot_goal": _coerce_text(meta.get("plot_goal"), plot_span.get("title") or f"{scene_id} plot {idx}"),
-                "mandatory_events": _coerce_list(meta.get("mandatory_events")),
                 "npc": _coerce_list(meta.get("npc")),
                 "locations": _coerce_list(meta.get("locations")),
                 "raw_text": _slice_document_text(document, plot_span["start"], plot_span["end"]),
@@ -1604,7 +1600,6 @@ def _build_fixed_scene_metadata_prompt(
         "    {\n"
         '      "plot_index": 1,\n'
         '      "plot_goal": "...",\n'
-        '      "mandatory_events": ["..."],\n'
         '      "npc": ["..."],\n'
         '      "locations": ["..."]\n'
         "    }\n"
@@ -2031,7 +2026,6 @@ def _build_story_prompt(
         '      "plots": [\n'
         "        {\n"
         '          "plot_goal": "...",\n'
-        '          "mandatory_events": ["..."],\n'
         '          "npc": ["..."],\n'
         '          "locations": ["..."],\n'
         '          "source_page_start": 1,\n'
@@ -2039,7 +2033,6 @@ def _build_story_prompt(
         "        },\n"
         "        {\n"
         '          "plot_goal": "...",\n'
-        '          "mandatory_events": ["..."],\n'
         '          "npc": ["..."],\n'
         '          "locations": ["..."],\n'
         '          "source_page_start": 1,\n'
@@ -2125,7 +2118,6 @@ def _build_plot_refine_prompt(
         '  "plots": [\n'
         "    {\n"
         '      "plot_goal": "...",\n'
-        '      "mandatory_events": ["..."],\n'
         '      "npc": ["..."],\n'
         '      "locations": ["..."],\n'
         '      "source_page_start": 1,\n'
@@ -2205,27 +2197,14 @@ def _rule_split_plots(
     left_end = midpoint
     right_start = midpoint + 1 if midpoint < source_end else source_end
 
-    if base_plot and isinstance(base_plot.get("mandatory_events"), list):
-        events = [str(e).strip() for e in base_plot.get("mandatory_events", []) if str(e).strip()]
+    sentences = [s for s in re.split(r"[。！？!?；;\n]+", scene_description or "") if s.strip()]
+    if len(sentences) >= 2:
+        half = max(1, len(sentences) // 2)
+        first_goal = sentences[0].strip() if half == 1 else " ".join(s.strip() for s in sentences[:half])
+        second_goal = " ".join(s.strip() for s in sentences[half:])
     else:
-        events = []
-
-    if len(events) >= 2:
-        split_at = max(1, len(events) // 2)
-        first_events = events[:split_at]
-        second_events = events[split_at:]
-    else:
-        sentences = [s for s in re.split(r"[。！？!?；;\n]+", scene_description or "") if s.strip()]
-        if len(sentences) >= 2:
-            half = max(1, len(sentences) // 2)
-            first_events = [f"{sentences[0].strip()}" if half == 1 else "；".join(s.strip() for s in sentences[:half])]
-            second_events = ["；".join(s.strip() for s in sentences[half:])]
-        else:
-            first_events = ["进入并建立局势"]
-            second_events = ["推进冲突并形成下一步行动"]
-
-    first_goal = first_events[0] if first_events else f"{scene_goal}（前段推进）"
-    second_goal = second_events[0] if second_events else f"{scene_goal}（后段推进）"
+        first_goal = f"{scene_goal}（前段推进）"
+        second_goal = f"{scene_goal}（后段推进）"
 
     base_npc = _coerce_list(base_plot.get("npc") if isinstance(base_plot, dict) else [])
     base_locations = _coerce_list(base_plot.get("locations") if isinstance(base_plot, dict) else [])
@@ -2233,7 +2212,6 @@ def _rule_split_plots(
     return [
         {
             "plot_goal": _coerce_text(first_goal, f"{scene_goal}（前段）"),
-            "mandatory_events": first_events,
             "npc": base_npc,
             "locations": base_locations,
             "source_page_start": source_start,
@@ -2241,7 +2219,6 @@ def _rule_split_plots(
         },
         {
             "plot_goal": _coerce_text(second_goal, f"{scene_goal}（后段）"),
-            "mandatory_events": second_events,
             "npc": base_npc,
             "locations": base_locations,
             "source_page_start": right_start,

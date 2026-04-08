@@ -12,7 +12,6 @@ def main() -> int:
     try:
         user_input = 'I want to inspect the alley behind the market.'
         plot_goal = 'Find the suspect route'
-        mandatory_events = ['Interview witness', 'Inspect map']
         history = [
             {'user': 'I head to the market', 'agent': 'You arrive at the market.'},
             {'user': 'I ask a vendor', 'agent': 'The vendor points to a narrow alley.'},
@@ -21,10 +20,9 @@ def main() -> int:
         print('[test_rag] input:')
         print('  user_input=', user_input)
         print('  plot_goal=', plot_goal)
-        print('  mandatory_events=', mandatory_events)
         print('  history=', history)
 
-        queries = generate_retrieval_queries(user_input, plot_goal, mandatory_events, history)
+        queries = generate_retrieval_queries(user_input, plot_goal, history)
         print('[test_rag] output: retrieval queries ->', queries)
 
         docs = [

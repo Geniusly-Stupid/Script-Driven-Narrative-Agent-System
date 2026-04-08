@@ -195,7 +195,6 @@ def main() -> int:
     ]
 
     for plot in plot_rows:
-        plot["mandatory_events"] = _safe_json_loads(plot.get("mandatory_events", "[]") or "[]")
         plot["npc"] = _safe_json_loads(plot.get("npc", "[]") or "[]")
         plot["locations"] = _safe_json_loads(plot.get("locations", "[]") or "[]")
         plot["navigation"] = _safe_json_loads(plot.get("navigation_json", "{}") or "{}")
@@ -269,7 +268,6 @@ def main() -> int:
                     f"{unit_label}_start": plot_start,
                     f"{unit_label}_end": plot_end,
                     f"{unit_label}_count": _span_count(plot_start, plot_end),
-                    "mandatory_events": plot.get("mandatory_events", []),
                     "npc": plot.get("npc", []),
                     "locations": plot.get("locations", []),
                     "raw_text": _display_text(plot.get("raw_text", ""), args.full_text),

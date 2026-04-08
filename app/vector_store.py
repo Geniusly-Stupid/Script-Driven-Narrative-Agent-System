@@ -101,16 +101,6 @@ class ChromaStore:
                             'metadata': {'scene_id': scene_id, 'plot_id': plot_id},
                         }
                     )
-                for event in plot.get('mandatory_events', []):
-                    docs.append(
-                        {
-                            'type': 'event',
-                            'name': event[:80],
-                            'description': event,
-                            'metadata': {'scene_id': scene_id, 'plot_id': plot_id},
-                        }
-                    )
-
         for item in knowledge or []:
             knowledge_type = str(item.get('knowledge_type', 'other')).strip().lower() or 'other'
             mapped_type = self._map_knowledge_type_to_doc_type(knowledge_type)
