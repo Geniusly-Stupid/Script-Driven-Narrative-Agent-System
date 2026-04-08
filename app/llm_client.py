@@ -180,8 +180,28 @@ def _read_llm_backend_from_file() -> str | None:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        return line.lower()
+        return line
     return None
+
+
+def _parse_backend_line(raw: str) -> tuple[str, str | None]:
+    """
+    Parse llm_backend.txt line.
+    Supported:
+      - "qwen"
+      - "openai"
+      - "qwen qwen/qwen3.5-397b-a17b"
+      - "openai gpt-4o-mini"
+    """
+    text = (raw or "").strip()
+    if not text:
+        return "", None
+    parts = text.split()
+    if len(parts) == 1:
+        return parts[0].strip().lower(), None
+    backend = parts[0].strip().lower()
+    model = " ".join(parts[1:]).strip()
+    return backend, (model or None)
 
 
 def _normalize_provider(provider: str | None) -> str:
@@ -193,10 +213,10 @@ def _normalize_provider(provider: str | None) -> str:
     if not raw:
         raw = (os.getenv("LLM_PROVIDER") or "").strip()
     if not raw:
-        raw = (_read_llm_backend_from_file() or "").strip()
+        raw = _read_llm_backend_from_file() or ""
     if not raw:
         raw = "qwen"
-    key = raw.lower()
+    key, _ = _parse_backend_line(raw)
     if key in {"qwen", "nvidia", "nv"}:
         return "nvidia"
     if key in {"openai", "oai"}:
@@ -205,6 +225,15 @@ def _normalize_provider(provider: str | None) -> str:
         f"Unsupported LLM backend {raw!r}. Use qwen (NVIDIA), nvidia, or openai "
         f"(see {LLM_BACKEND_FILE} or LLM_PROVIDER)."
     )
+
+
+def _model_from_file_for(provider: str) -> str | None:
+    raw = _read_llm_backend_from_file() or ""
+    backend, model = _parse_backend_line(raw)
+    if not backend or not model:
+        return None
+    normalized = _normalize_provider(backend)
+    return model if normalized == provider else None
 
 
 def _call_openai_llm(
@@ -484,7 +513,8 @@ def call_llm(
 ) -> str:
     provider = _normalize_provider(provider)
     if provider == "nvidia":
-        model = os.getenv("NVIDIA_MODEL", model or NVIDIA_DEFAULT_MODEL)
+        if model is None:
+            model = os.getenv("NVIDIA_MODEL") or _model_from_file_for("nvidia") or NVIDIA_DEFAULT_MODEL
         return _call_nvidia_llm(
             prompt,
             model,
@@ -493,7 +523,8 @@ def call_llm(
             timeout=timeout,
         )
 
-    model = os.getenv("OPENAI_MODEL", model or OPENAI_DEFAULT_MODEL)
+    if model is None:
+        model = os.getenv("OPENAI_MODEL") or _model_from_file_for("openai") or OPENAI_DEFAULT_MODEL
     return _call_openai_llm(
         prompt,
         model,

@@ -15,7 +15,7 @@ except ImportError:
 from langgraph.graph import END, StateGraph
 
 from app.database import Database
-from app.llm_client import call_nvidia_llm
+from app.llm_client import call_llm
 from app.rag import categorize_docs, generate_retrieval_queries
 from app.state import (
     classify_player_alignment,
@@ -820,9 +820,11 @@ class NarrativeAgent:
             state.setdefault('debug_prompts', []).append(entry)
         self.latest_debug_prompts.append(entry)
 
-    def _llm_call(self, prompt: str, *, step_name: str, model: str = "qwen/qwen3.5-397b-a17b") -> str:
+    def _llm_call(self, prompt: str, *, step_name: str, model: str | None = None) -> str:
         logger.info("LLM step=%s prompt_length=%s", step_name, len(prompt))
-        return call_nvidia_llm(prompt, model=model, step_name=step_name).strip()
+        # Do not hardcode NVIDIA/Qwen model ids here; backend/model is selected by
+        # llm_backend.txt (or LLM_PROVIDER) and OPENAI_MODEL/NVIDIA_MODEL env vars.
+        return call_llm(prompt, model=model, step_name=step_name).strip()
 
     def _get_output_language(self, state: NarrativeState | None = None) -> str:
         if state and state.get('output_language'):
@@ -2021,7 +2023,7 @@ Recent History:
 """
         self._record_prompt(state, 'plot_summary_prompt', prompt)
         try:
-            summary = call_nvidia_llm(prompt, step_name='plot_summary_generation').strip()
+            summary = call_llm(prompt, step_name='plot_summary_generation').strip()
             if summary:
                 return summary
         except Exception:
@@ -2095,7 +2097,7 @@ Completed / Skipped Plot Summaries:
 """
         self._record_prompt(state, 'scene_summary_prompt', prompt)
         try:
-            summary = call_nvidia_llm(prompt, step_name='scene_summary_generation').strip()
+            summary = call_llm(prompt, step_name='scene_summary_generation').strip()
             if summary:
                 return summary
         except Exception:

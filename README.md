@@ -154,7 +154,7 @@ This separation keeps deterministic state operations isolated from semantic sear
 
 ### 1) Choose the LLM backend (one file, default is Qwen / NVIDIA)
 
-In the project root, edit **`llm_backend.txt`**. The first non-empty line that is not a comment (`#`) must be either:
+In the project root, edit **`llm_backend.txt`**. The first non-empty line that is not a comment (`#`) must start with either:
 
 - **`qwen`** — use the NVIDIA Build API with Qwen models (same as writing `nvidia`; this is the **default**).
 - **`openai`** — use the OpenAI Chat Completions API instead.
@@ -163,6 +163,16 @@ Example:
 
 ```text
 qwen
+```
+
+You can optionally specify a model on the same line:
+
+```text
+qwen qwen/qwen3.5-397b-a17b
+```
+
+```text
+openai gpt-4o-mini
 ```
 
 To switch to OpenAI, change that line to:
