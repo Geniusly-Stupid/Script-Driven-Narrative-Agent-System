@@ -172,7 +172,7 @@ qwen qwen/qwen3.5-397b-a17b
 ```
 
 ```text
-openai gpt-4o-mini
+openai gpt-5_4-mini-2026-03-17
 ```
 
 To switch to OpenAI, change that line to:
@@ -212,7 +212,7 @@ OPENAI_API_KEY=sk-...
 OpenAI-only tuning (optional):
 
 ```bash
-export OPENAI_MODEL="gpt-4o-mini"
+export OPENAI_MODEL="gpt-5_4-mini-2026-03-17"
 export OPENAI_MAX_TOKENS=2048
 export OPENAI_TEMPERATURE=0.6
 export OPENAI_TOP_P=0.95
