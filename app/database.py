@@ -445,6 +445,18 @@ class Database:
             hydrated_rows.append(record)
         return hydrated_rows
 
+    def get_global_recent_turns(self, limit: int = 12) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            'SELECT user, agent, turn_state_json, timestamp, visit_id FROM memory ORDER BY id DESC LIMIT ?',
+            (limit,),
+        ).fetchall()
+        hydrated_rows: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            record = dict(row)
+            record['turn_state'] = parse_json_object(record.get('turn_state_json', '{}'))
+            hydrated_rows.append(record)
+        return hydrated_rows
+
     def has_scene_opening(self, scene_id: str, marker: str, visit_id: int | None = None) -> bool:
         if visit_id is None:
             row = self.conn.execute(

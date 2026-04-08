@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -1154,7 +1154,7 @@ def classify_player_alignment(
         "plot_goal": plot_goal,
         "scene_goal": scene_goal,
         "scene_description": scene_description,
-        "current_plot_excerpt": _truncate_text(current_plot_raw_text, 500) or "None",
+        "current_plot_excerpt": _truncate_text(current_plot_raw_text, 2000) or "None",
         "current_scene_boundary_summary": _current_scene_boundary_summary(
             scene_goal,
             scene_description,
@@ -1416,7 +1416,7 @@ def story_position_context(
     latest_transition = deepcopy(nav_state.get("latest_transition", {}))
 
     return {
-        "current_plot_raw_text": _truncate_text(str(current_plot.get("raw_text", "")), 600),
+        "current_plot_raw_text": _truncate_text(str(current_plot.get("raw_text", "")), 3000),
         "current_navigation": current_navigation,
         "allowed_targets": allowed_targets,
         "allowed_targets_summary": _target_lines(allowed_targets),

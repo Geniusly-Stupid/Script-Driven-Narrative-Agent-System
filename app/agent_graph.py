@@ -344,8 +344,7 @@ Examples when checks are needed:
 - Searching for hidden evidence -> Spot Hidden
 - Reading strange documents -> Library Use
 - Staying calm before horror -> SAN
-- Forcing a stuck door -> STR
-- Dodging an attack -> DEX or Dodge
+- Dodging an attack -> Dodge
 
 Tool usage format reference:
 TOOL_CALL: roll_dice
@@ -408,6 +407,7 @@ class NarrativeState(TypedDict, total=False):
     current_visit_id: int
     player_profile: dict[str, Any]
     conversation_history: list[dict[str, Any]]
+    global_conversation_history: list[dict[str, Any]]
     retrieved_docs: list[dict[str, Any]]
     latest_user_input: str
     effective_user_input: str
@@ -578,6 +578,7 @@ class NarrativeAgent:
             'input_consumed_by_transition': False,
             'entry_relationship': 'none',
             'conversation_history': [],
+            'global_conversation_history': [],
             'retrieved_docs': [],
             'mandatory_events': [],
             'current_plot_raw_text': '',
@@ -685,6 +686,7 @@ class NarrativeAgent:
             'input_consumed_by_transition': False,
             'entry_relationship': 'none',
             'conversation_history': [],
+            'global_conversation_history': [],
             'retrieved_docs': [],
             'mandatory_events': [],
             'current_plot_raw_text': '',
@@ -848,8 +850,13 @@ class NarrativeAgent:
             lines.extend(f"{k}:{v}" for k, v in derived.items())
         return '\n'.join(lines) or 'No player skills available.'
 
-    def _format_recent_conversation(self, state: NarrativeState, rounds: int = 3) -> str:
-        history = state.get('conversation_history', [])[-rounds:]
+    def _format_recent_conversation(
+        self,
+        state: NarrativeState,
+        rounds: int = 3,
+        history_key: str = 'conversation_history',
+    ) -> str:
+        history = state.get(history_key, [])[-rounds:]
         if not history:
             return 'None'
         lines: list[str] = []
@@ -859,14 +866,6 @@ class NarrativeAgent:
             lines.append(f"Player: {user_text}")
             lines.append(f"Keeper: {keeper_text}")
         return '\n'.join(lines)
-
-    def _plot_excerpt(self, raw_text: str, limit: int = 500) -> str:
-        text = (raw_text or '').strip()
-        if not text:
-            return 'None'
-        if len(text) <= limit:
-            return text
-        return f"{text[: limit - 3].rstrip()}..."
 
     def _trim_disallowed_opening_choice(self, text: str) -> str:
         response = (text or '').strip()
@@ -1093,6 +1092,7 @@ class NarrativeAgent:
             limit=12,
             visit_id=visit_id,
         )
+        state['global_conversation_history'] = self.db.get_global_recent_turns(limit=12)
         scene = self.db.get_scene(state['scene_id'])
         hints = story_position_context(
             self.db,
@@ -1241,7 +1241,7 @@ class NarrativeAgent:
             latest_agent_turn_excerpt=state.get('latest_agent_turn_excerpt', ''),
             latest_turn_state=state.get('latest_turn_state', {}),
             choice_prompt_active=bool(state.get('choice_prompt_active', False)),
-            conversation_history=state.get('conversation_history', []),
+            conversation_history=state.get('global_conversation_history', []),
             prompt_recorder=lambda prompt: self._record_prompt(state, 'pre_response_transition_prompt', prompt),
         )
         action = str(evaluation.get('action', 'stay'))
@@ -1485,7 +1485,7 @@ class NarrativeAgent:
     def generate_response(self, state: NarrativeState) -> NarrativeState:
         try:
             categorized = categorize_docs(state.get('retrieved_docs', []))
-            recent_conversation = self._format_recent_conversation(state, rounds=3)
+            recent_conversation = self._format_recent_conversation(state, rounds=3, history_key='global_conversation_history')
             self._refresh_resolved_check_summary(state)
             state['prompt'] = RESPONSE_PROMPT_TEMPLATE.format(
                 agent_role='Narrative Agent',
@@ -1909,7 +1909,7 @@ class NarrativeAgent:
         plot = self.db.get_plot(plot_id) or {}
         previous_scene_summary = self._get_previous_scene_summary(scene_id)
         output_language = self._get_output_language()
-        plot_excerpt = self._plot_excerpt(str(plot.get('raw_text', '')), limit=500)
+        plot_excerpt = str(plot.get('raw_text', ''))
         system_state = self.db.get_system_state()
         transition_context = story_position_context(
             self.db,
@@ -1977,7 +1977,7 @@ Opening Choice Allowed: {str(opening_choice_allowed).lower()}
     def _build_plot_summary(self, state: NarrativeState) -> str:
         tail = state.get('conversation_history', [])[-8:]
         history_text = '\n'.join([f"User: {t.get('user', '')}\nAgent: {t.get('agent', '')}" for t in tail])
-        plot_excerpt = self._plot_excerpt(state.get('current_plot_raw_text', ''), limit=650)
+        plot_excerpt = state.get('current_plot_raw_text', '')
         transition_label = self._target_descriptor(
             str(state.get('plot_advance_target_kind', '')),
             str(state.get('plot_advance_target_id', '')),
