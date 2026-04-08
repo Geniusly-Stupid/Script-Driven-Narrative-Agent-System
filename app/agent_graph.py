@@ -176,9 +176,6 @@ Scene Entry Turn:
 Previous Plot Summary:
 {previous_plot_summary}
 
-Current Scene Summary:
-{current_scene_summary}
-
 Recent Conversation:
 {recent_conversation}
 
@@ -363,9 +360,6 @@ Current Plot Excerpt:
 
 Previous Plot Summary:
 {previous_plot_summary}
-
-Current Scene Summary:
-{current_scene_summary}
 
 Recent Conversation:
 {recent_conversation}
@@ -1373,7 +1367,6 @@ class NarrativeAgent:
             current_plot_goal=state.get('plot_goal', '') or 'None',
             current_plot_excerpt=state.get('current_plot_raw_text', '') or 'None',
             previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
-            current_scene_summary=state.get('current_scene_summary', '') or 'None',
             recent_conversation=recent_conversation,
             player_related_info=str(state.get('player_profile', {})),
             allowed_targets_summary=state.get('eligible_targets_summary', 'None'),
@@ -1462,7 +1455,6 @@ class NarrativeAgent:
                 current_plot_excerpt=state.get('current_plot_raw_text', '') or 'None',
                 scene_entry_turn='true' if state.get('scene_entry_turn') else 'false',
                 previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
-                current_scene_summary=state.get('current_scene_summary', '') or 'None',
                 recent_conversation=recent_conversation,
                 npc_related_info=categorized['npc_related_info'],
                 player_related_info=str(state.get('player_profile', {})),

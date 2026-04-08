@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import random
@@ -569,11 +569,54 @@ def _render_status_line(state: dict[str, object]) -> None:
         st.markdown(f"<div class='gm-statusline'>{' / '.join(bits)}</div>", unsafe_allow_html=True)
 
 
-def _render_settings(debug_mode: bool, current_language: str) -> None:
+def _ensure_default_skill_lines(skill_lines: list[str]) -> list[str]:
+    normalized = []
+    seen: set[str] = set()
+    for line in skill_lines:
+        label = line.split(':', 1)[0].strip().lower()
+        normalized.append(line)
+        seen.add(label)
+    if 'dodge' not in seen:
+        # Default Dodge: 40
+        normalized.append('Dodge:40')
+    if 'fighting' not in seen:
+        # Default Fighting: 20
+        normalized.append('Fighting:20')
+    return normalized
+
+
+def _render_settings(debug_mode: bool, current_language: str, stage: str, player_profile: dict[str, object] | None = None) -> None:
+    if 'show_player_panel' not in st.session_state:
+        st.session_state.show_player_panel = False
+
+    if stage == 'session' and player_profile:
+        with st.sidebar:
+            st.markdown('**Player**')
+            name = str(player_profile.get('name', '') or '').strip()
+            background = str(player_profile.get('background', '') or '').strip()
+            archetype = str(player_profile.get('selected_archetype', '') or '').strip()
+            if name:
+                st.write(f'Name: {name}')
+            if archetype:
+                st.write(f'Archetype: {archetype}')
+            if background:
+                st.write(f'Background: {background}')
+
+            chosen_allocations = player_profile.get('chosen_skill_allocations', {}) or {}
+            occupation = chosen_allocations.get('occupation', []) if isinstance(chosen_allocations, dict) else []
+            personal_interest = chosen_allocations.get('personal_interest', []) if isinstance(chosen_allocations, dict) else []
+            if occupation or personal_interest:
+                st.markdown('**Skill Allocation**')
+            if occupation:
+                st.caption('Occupation Skills')
+                st.code('\n'.join(str(item) for item in occupation), language='text')
+            if personal_interest:
+                st.caption('Personal Interest Skills')
+                st.code('\n'.join(str(item) for item in personal_interest), language='text')
+
     st.markdown("<div class='gm-settings'></div>", unsafe_allow_html=True)
     with st.expander('Settings', expanded=False):
         st.selectbox('Output Language', options=['English', 'Chinese'], index=['English', 'Chinese'].index(current_language), key='output_language_select')
-
 
 def _render_loading_state(target: object, text: str, centered: bool = False) -> None:
     if centered:
@@ -581,7 +624,7 @@ def _render_loading_state(target: object, text: str, centered: bool = False) -> 
             f"""
             <div class="gm-parse-overlay">
                 <div class="gm-loading-shell">
-                    <div class="gm-loading-icon">✦</div>
+                    <div class="gm-loading-icon">鉁?/div>
                     <div class="gm-loading-text">{text}</div>
                     <div class="gm-loading-dots" aria-hidden="true">
                         <span></span><span></span><span></span>
@@ -869,7 +912,7 @@ def run_app() -> None:
     if current_language not in language_options:
         current_language = 'English'
     debug_mode = st.sidebar.toggle('Debug Prompt View', value=bool(st.session_state.get('debug_prompt_toggle', False)), key='debug_prompt_toggle')
-    _render_settings(debug_mode, current_language)
+    _render_settings(debug_mode, current_language, stage=state.get('stage', 'upload'), player_profile=db.get_player_profile())
     debug_mode = bool(st.session_state.get('debug_prompt_toggle', debug_mode))
     selected_language = st.session_state.get('output_language_select', current_language)
     if hasattr(agent, 'set_debug_mode'):
@@ -1191,8 +1234,8 @@ def run_app() -> None:
         selected_build = archetype_to_build[selected_archetype_name]
 
         _render_section_header('Step 4: Skills', 'Step 4')
-        occ_default = '\n'.join(selected_build['occupation_suggested'])
-        interest_default = '\n'.join(selected_build['interest_suggested'])
+        occ_default = '\n'.join(_ensure_default_skill_lines(list(selected_build['occupation_suggested'])))
+        interest_default = '\n'.join(_ensure_default_skill_lines(list(selected_build['interest_suggested'])))
         if not st.session_state.occupation_alloc_text:
             st.session_state.occupation_alloc_text = occ_default
         if not st.session_state.interest_alloc_text:

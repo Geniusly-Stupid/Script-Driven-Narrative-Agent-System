@@ -4,6 +4,6 @@ qwen qwen/qwen2.5-7b-instruct
 # Optional: per-step overrides — must match step_name in code
 check_whether_roll_dice = qwen qwen/qwen3.5-397b-a17b
 scene_opening_generation = qwen qwen/qwen3.5-397b-a17b
-generate_response = openai gpt-5-chat-latest
+generate_response = qwen qwen/qwen3.5-397b-a17b
 plot_summary_generation = qwen qwen/qwen3.5-397b-a17b
 scene_summary_generation = qwen qwen/qwen3.5-397b-a17b
