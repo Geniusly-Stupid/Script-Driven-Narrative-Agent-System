@@ -299,6 +299,17 @@ def _resolve_provider_and_model(
     return provider, model
 
 
+def _openai_chat_uses_max_completion_tokens(model: str) -> bool:
+    """
+    GPT-5+ (and some reasoning models) reject `max_tokens` on Chat Completions;
+    they require `max_completion_tokens` instead.
+    """
+    if (os.getenv("OPENAI_USE_MAX_COMPLETION_TOKENS") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    m = (model or "").strip().lower()
+    return "gpt-5" in m or m.startswith("o1") or m.startswith("o3")
+
+
 def _call_openai_llm(
     prompt: str,
     model: str,
@@ -320,14 +331,17 @@ def _call_openai_llm(
         "Content-Type": "application/json",
     }
 
-    payload = {
+    payload: dict[str, object] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": top_p,
         "stream": False,
     }
+    if _openai_chat_uses_max_completion_tokens(model):
+        payload["max_completion_tokens"] = max_tokens
+    else:
+        payload["max_tokens"] = max_tokens
 
     prompt_length = len(prompt)
     last_error: Exception | None = None

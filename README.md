@@ -234,6 +234,10 @@ export OPENAI_TEMPERATURE=0.6
 export OPENAI_TOP_P=0.95
 ```
 
+**GPT-5.x on Chat Completions:** newer models expect **`max_completion_tokens`** instead of `max_tokens`. This project sends the correct field automatically when the model id looks like GPT-5 (for example `gpt-5.2`, `gpt-5.4`, or snapshots containing `gpt-5`). If you still see `unsupported parameter` errors, set `OPENAI_USE_MAX_COMPLETION_TOKENS=true` to force that behavior.
+
+**Per-step keys must match code:** lines like `parser_extract = ...` only apply if the Python code passes `step_name="parser_extract"`. If the name does not match any call site, that row is ignored (see the list of known `step_name` values above).
+
 No code changes are required to switch: edit **`llm_backend.txt`** and ensure the matching API key is configured.
 
 Once the API key is set up, create and activate a virtual environment:
