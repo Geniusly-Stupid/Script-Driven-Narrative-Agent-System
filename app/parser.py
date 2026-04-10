@@ -26,7 +26,9 @@ Given a piece of narrative text, extract structured information in JSON format.
 Definitions (IMPORTANT):
 
 - NOT all content should be converted into scenes or plots.
-- Only extract a scene if the text clearly describes a **player-initiated activity at a specific location**.
+- Only extract a scene if the text clearly describes a **player-related activity at a specific location**.
+  - A scene should involve the player taking action, such as accepting a task, making a decision, interact with NPC/environment or investigate something.
+  - Do NOT extract a scene if the text only provides background information (e.g., NPC descriptions or lore).
 - Only extract plots if there are **clear player actions or tasks within that scene**. Each scene at least has 1 plot.
 
 - If the content is:

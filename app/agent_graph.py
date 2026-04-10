@@ -182,6 +182,8 @@ Skill Check Result:
 ---
 # OTHER SCENE INFORMATION
 
+If the current scene is sufficiently explored (i.e., no meaningful information remains in the Current Plot Raw Text), you may guide the player naturally toward the next scene. This transition should feel seamless and in-world (e.g., through narration, NPC actions, or environmental cues)
+
 Next Scene Name:
 {next_scene_name}
 
@@ -228,7 +230,7 @@ Examples when checks are needed:
 - Reading strange documents -> Library Use
 - Staying calm before horror -> SAN
 - Forcing a stuck door -> STR
-- Dodging an attack -> DEX or Dodge
+- Dodging an attack -> Dodge
 
 Tool usage format reference:
 TOOL_CALL: roll_dice
@@ -306,6 +308,16 @@ AND:
 
 - This judgment is based ONLY on the Current Plot Raw Text  
 - NOT on newly generated narrative content
+
+---
+
+### Target Selection Rule
+
+When selecting the next scene:
+
+- Prefer scenes that appear earlier in the provided unvisited scene list  
+- If multiple scenes seem equally relevant, choose the earlier one  
+- Later scenes typically represent follow-up content that depends on earlier scenes being explored  
 
 ---
 
@@ -1077,6 +1089,7 @@ Guidelines:
 - Focus only on what is happening right now.
 - Reveal information gradually. Do not provide too much information at once; encourage player exploration and role-play.
 - Present the situation, then STOP and wait for the player to decide what to do next.
+- Avoid meta commentary. Do not mention scene IDs, scene names, or any system-level information.
 - Do NOT reveal future events or the full storyline.
 - Do NOT decide the player character’s actions or thoughts.
 - Do NOT ask hook questions.

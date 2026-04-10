@@ -2,10 +2,10 @@
 qwen qwen/qwen2.5-7b-instruct
 
 # Optional: per-step overrides — must match step_name in code
-parser_extract = openai gpt-4o-mini
-branch_transition_decision = openai gpt-5-chat-latest
-check_whether_roll_dice = qwen qwen/qwen3.5-397b-a17b
-scene_opening_generation = qwen qwen/qwen3.5-397b-a17b
+parser_extract = openai gpt-5.4-mini
+branch_transition_decision = openai gpt-5.4
+check_whether_roll_dice = openai gpt-5-chat-latest
+scene_opening_generation = openai gpt-5-chat-latest
 generate_response = openai gpt-5-chat-latest
-plot_summary_generation = qwen qwen/qwen3.5-397b-a17b
-scene_summary_generation = qwen qwen/qwen3.5-397b-a17b
+plot_summary_generation = openai gpt-5.4-mini
+scene_summary_generation = openai gpt-5.4-mini

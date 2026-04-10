@@ -53,7 +53,7 @@ def _step_max_tokens(step_name: str, default_max_tokens: int) -> int:
         "scene_summary_generation",
     }:
         return min(default_max_tokens, 768)
-    if step in {"generate_response"}:
+    if step in {"generate_response", "parser_extract"}:
         return min(default_max_tokens, 1536)
     return default_max_tokens
 
@@ -323,7 +323,7 @@ def _call_openai_llm(
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
+        "max_completion_tokens": max_tokens,
         "temperature": temperature,
         "top_p": top_p,
         "stream": False,
