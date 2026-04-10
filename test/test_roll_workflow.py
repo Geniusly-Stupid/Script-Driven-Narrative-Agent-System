@@ -75,7 +75,7 @@ def _build_agent(db_name: str, chroma_name: str) -> tuple[NarrativeAgent, Databa
 
 
 def main() -> int:
-    old_agent_llm = agent_graph_module.call_nvidia_llm
+    old_agent_llm = agent_graph_module.call_llm
     old_state_llm = state_module.call_nvidia_llm
     old_randint = agent_graph_module.random.randint
 
@@ -107,7 +107,7 @@ def main() -> int:
                 return '{"scene_progress": 0.1}'
             return '{}'
 
-        agent_graph_module.call_nvidia_llm = fake_agent_llm
+        agent_graph_module.call_llm = fake_agent_llm
         state_module.call_nvidia_llm = fake_state_llm
         agent_graph_module.random.randint = lambda a, b: 12
 
@@ -152,7 +152,7 @@ def main() -> int:
         print(f'[test_roll_workflow] result: FAIL -> {exc}')
         return 1
     finally:
-        agent_graph_module.call_nvidia_llm = old_agent_llm
+        agent_graph_module.call_llm = old_agent_llm
         state_module.call_nvidia_llm = old_state_llm
         agent_graph_module.random.randint = old_randint
 

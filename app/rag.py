@@ -66,38 +66,27 @@ Recent Conversation:
 def categorize_docs(docs: list[dict]) -> dict[str, str]:
     buckets: dict[str, list[str]] = {
         'npc': [],
-        'player': [],
-        'location': [],
-        'rule': [],
-        'item_or_clue': [],
-        'world_context': [],
-        'truth': [],
+        'setting': [],
+        'clue': [],
     }
-    for d in docs:
-        meta = d.get('metadata', {}) or {}
-        t = meta.get('type', 'event')
-        content = d.get('content', '')
-        if t == 'npc':
+    for doc in docs:
+        meta = doc.get('metadata', {}) or {}
+        raw_type = str(meta.get('type') or meta.get('knowledge_type') or 'other').strip().lower()
+        content = str(doc.get('content', '')).strip()
+        if not content:
+            continue
+        if raw_type == 'npc':
             buckets['npc'].append(content)
-        elif t == 'location':
-            buckets['location'].append(content)
-        elif t == 'rule':
-            buckets['rule'].append(content)
-        elif t in {'item', 'event', 'clue'}:
-            buckets['item_or_clue'].append(content)
-        elif t == 'world_context':
-            knowledge_type = str(meta.get('knowledge_type', 'other')).strip().lower()
-            if knowledge_type == 'truth':
-                buckets['truth'].append(content)
-            else:
-                buckets['world_context'].append(f"[{knowledge_type}] {content}" if knowledge_type else content)
+            continue
+        if raw_type in {'clue', 'item', 'event'}:
+            buckets['clue'].append(content)
+            continue
+        # The current schema emits setting|npc|clue|other. Any legacy knowledge payloads are
+        # folded into setting so the prompt surface stays on the current schema.
+        buckets['setting'].append(content)
 
     return {
         'npc_related_info': '\n'.join(buckets['npc']) or 'None',
-        'player_related_info': '\n'.join(buckets['player']) or 'None',
-        'location_related_info': '\n'.join(buckets['location']) or 'None',
-        'game_rule_info': '\n'.join(buckets['rule']) or 'None',
-        'item_or_clue_info': '\n'.join(buckets['item_or_clue']) or 'None',
-        'world_context_info': '\n'.join(buckets['world_context']) or 'None',
-        'truth_related_info': '\n'.join(buckets['truth']) or 'None',
+        'setting': '\n'.join(buckets['setting']) or 'None',
+        'clue': '\n'.join(buckets['clue']) or 'None',
     }

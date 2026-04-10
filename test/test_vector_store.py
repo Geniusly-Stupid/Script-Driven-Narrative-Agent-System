@@ -29,19 +29,15 @@ def main() -> int:
         knowledge = [
             {
                 'knowledge_id': 'knowledge_1',
-                'knowledge_type': 'background',
+                'knowledge_type': 'setting',
                 'title': 'Temple History',
                 'content': 'The temple was sealed after a faction conflict.',
-                'source_page_start': 1,
-                'source_page_end': 1,
             },
             {
                 'knowledge_id': 'knowledge_2',
-                'knowledge_type': 'truth',
+                'knowledge_type': 'other',
                 'title': 'Hidden Truth',
                 'content': 'The archivist forged records to hide a pact.',
-                'source_page_start': 2,
-                'source_page_end': 2,
             },
         ]
 
@@ -55,7 +51,7 @@ def main() -> int:
         print('[test_vector_store] output: search result ->', result)
 
         assert result, 'search should return documents'
-        assert any(r.get('metadata', {}).get('type') == 'world_context' for r in result), 'world_context docs should be searchable'
+        assert any(r.get('metadata', {}).get('type') == 'setting' for r in result), 'setting docs should be searchable'
 
         print('[test_vector_store] result: PASS')
         return 0

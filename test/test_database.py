@@ -7,35 +7,31 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.database import Database
-from app.navigation import default_navigation
 
 
 def _build_db(db_path: Path) -> Database:
     if db_path.exists():
         os.remove(db_path)
     db = Database(str(db_path))
-    nav = default_navigation()
     db.insert_scenes(
         [
             {
                 'scene_id': 'scene_t1',
+                'scene_index': 1,
+                'scene_name': 'Test Scene',
                 'scene_goal': 'Follow the first lead.',
                 'scene_description': 'A small test scene.',
                 'status': 'in_progress',
                 'scene_summary': '',
-                'node_kind': 'linear',
-                'navigation': nav,
                 'plots': [
                     {
                         'plot_id': 'scene_t1_plot_1',
+                        'plot_index': 1,
+                        'plot_name': 'Inspect the room',
                         'plot_goal': 'Inspect the room.',
-                        'npc': [],
-                        'locations': [],
                         'raw_text': 'A quiet room with scattered notes.',
                         'status': 'in_progress',
                         'progress': 0.0,
-                        'node_kind': 'linear',
-                        'navigation': nav,
                     }
                 ],
             }
@@ -45,17 +41,17 @@ def _build_db(db_path: Path) -> Database:
 
 
 def main() -> int:
-    db_path = ROOT / 'test' / 'debug_database_turn_state.db'
+    db_path = ROOT / 'test' / 'debug_database_linear.db'
     db = None
     reopened = None
     try:
         print('[test_database] input: create database and persist structured turn state')
         db = _build_db(db_path)
         turn_state = {
-            'choice_open': True,
-            'offered_targets': [{'target_kind': 'scene', 'target_id': 'scene_t1'}],
+            'choice_open': False,
+            'offered_targets': [],
             'beat_status': 'wrapped',
-            'summary': 'keeper offered a follow-up lead',
+            'summary': 'the active beat is resolved',
         }
         db.append_memory(
             'scene_t1',
@@ -76,6 +72,13 @@ def main() -> int:
         reopened = Database(str(db_path))
         reopened_turns = reopened.get_recent_turns('scene_t1', 'scene_t1_plot_1', limit=5, visit_id=7)
         assert reopened_turns[0]['turn_state'] == turn_state, 'reopened database should preserve turn_state_json'
+
+        print('[test_database] input: list scenes should return the stored schema directly without navigation patches')
+        scenes = reopened.list_scenes()
+        assert scenes[0]['scene_name'] == 'Test Scene'
+        assert scenes[0]['plots'][0]['plot_name'] == 'Inspect the room'
+        assert 'navigation' not in scenes[0], 'legacy navigation should not be injected'
+        assert 'node_kind' not in scenes[0], 'legacy node_kind should not be injected'
 
         print('[test_database] input: check runtime story-specific patches are gone')
         for source_path in (

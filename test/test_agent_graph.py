@@ -9,7 +9,6 @@ import app.agent_graph as agent_graph_module
 import app.state as state_module
 from app.agent_graph import NarrativeAgent
 from app.database import Database
-from app.navigation import default_navigation, make_target
 
 
 class DummyVectorStore:
@@ -17,269 +16,161 @@ class DummyVectorStore:
         return []
 
 
-def _agent_llm(prompt: str, *args, **kwargs):
+def _fake_llm(prompt: str, *args, **kwargs) -> str:
     step_name = kwargs.get('step_name', '')
+    if step_name == 'scene_opening_generation':
+        return 'The foyer smells of damp wool and old varnish. A fresh scrape marks the coat stand.'
     if step_name == 'check_whether_roll_dice':
-        if 'ROLL_TRIGGER_TEST' in prompt:
-            return '{"need_check": true, "skill": "Spot Hidden", "reason": "llm_requests_check", "dice_type": "1d100"}'
-        if 'ROLL_INVALID_TEST' in prompt:
-            return 'not-json'
         return '{"need_check": false, "skill": "", "reason": "", "dice_type": ""}'
     if step_name == 'player_alignment_classification':
-        if 'Latest Player Input:\nI go to the library.' in prompt:
-            return (
-                '{"alignment": "target_choice", "action": "target", "target_kind": "scene", '
-                '"target_id": "scene_library", "transition_path": "direct", "close_current": false, '
-                '"confidence": 0.97, "reason": "llm_selected_library"}'
-            )
         if 'Latest Player Input:\nI ask about the weather.' in prompt:
-            return (
-                '{"alignment": "off_topic", "action": "stay", "target_kind": "", "target_id": "", '
-                '"transition_path": "stay", "close_current": false, "confidence": 0.88, '
-                '"reason": "llm_detected_off_topic"}'
-            )
-        return (
-            '{"alignment": "current_plot", "action": "stay", "target_kind": "", "target_id": "", '
-            '"transition_path": "stay", "close_current": false, "confidence": 0.34, '
-            '"reason": "llm_kept_current_plot"}'
-        )
-    if step_name == 'plot_completion_evaluation':
-        if 'User: I search the shelves for the obituary.' in prompt:
-            return (
-                '{"completed": true, "objective_satisfied": true, "progress_delta": 0.6, '
-                '"action": "stay", "target_kind": "", "target_id": "", "transition_path": "stay", '
-                '"close_current": true, "confidence": 0.93, "reason": "llm_wrapped_library"}'
-            )
-        return (
-            '{"completed": false, "objective_satisfied": false, "progress_delta": 0.0, '
-            '"action": "stay", "target_kind": "", "target_id": "", "transition_path": "stay", '
-            '"close_current": false, "confidence": 0.31, "reason": "llm_keep_current_plot"}'
-        )
+            return '{"alignment": "off_topic", "reason": "llm_detected_off_topic", "confidence": 0.88}'
+        return '{"alignment": "current_plot", "reason": "continue_current_plot", "confidence": 0.72}'
     if step_name == 'turn_state_extraction':
-        if 'scene_library' in prompt and 'scene_police' in prompt:
+        if 'You recover the ledger from behind the coats.' in prompt:
+            return '{"beat_status": "wrapped", "summary": "the foyer beat is resolved"}'
+        if 'The caretaker admits he saw a man limping toward the bridge.' in prompt:
+            return '{"beat_status": "wrapped", "summary": "the study beat is resolved"}'
+        return '{"beat_status": "open", "summary": "the beat remains open"}'
+    if step_name == 'plot_completion_evaluation':
+        if 'Latest User Input:\nI inspect the coat stand carefully.' in prompt:
             return (
-                '{"choice_open": true, "offered_targets": ['
-                '{"target_kind": "scene", "target_id": "scene_library"}, '
-                '{"target_kind": "scene", "target_id": "scene_police"}], '
-                '"beat_status": "open", "summary": "two legal leads are open"}'
+                '{"completed": true, "objective_satisfied": true, "progress_delta": 1.0, '
+                '"close_current": true, "reason": "foyer_resolved"}'
             )
-        if 'You find the obituary and this lead is wrapped.' in prompt:
+        if 'Latest User Input:\nI question the caretaker about the ledger.' in prompt:
             return (
-                '{"choice_open": false, "offered_targets": [], '
-                '"beat_status": "wrapped", "summary": "library lead wrapped"}'
+                '{"completed": true, "objective_satisfied": true, "progress_delta": 1.0, '
+                '"close_current": true, "reason": "study_resolved"}'
             )
         return (
-            '{"choice_open": false, "offered_targets": [], '
-            '"beat_status": "open", "summary": "no active choice"}'
+            '{"completed": false, "objective_satisfied": false, "progress_delta": 0.1, '
+            '"close_current": false, "reason": "plot_continues"}'
         )
     if step_name == 'generate_response':
-        if 'Scene ID: scene_start' in prompt and 'Player Input:\n\n' in prompt:
-            return 'You can follow either lead from here.'
-        if 'Scene ID: scene_library' in prompt:
-            if 'Input Consumed By Transition:\ntrue' in prompt and 'Transition Trigger Input:\nI go to the library.' in prompt:
-                return 'You step into the library archives, where dust hangs over the obituary index.'
-            if 'Player Input:\nI ask about the weather.' in prompt:
-                return 'The librarian ignores the weather and points you back toward the obituary shelves.'
-            if 'Player Input:\nI search the shelves for the obituary.' in prompt:
-                return 'You find the obituary and this lead is wrapped.'
-            return 'Dust hangs over the obituary index.'
+        if 'Plot ID: scene_1_plot_1' in prompt and 'Player Input:\n\n' in prompt:
+            return 'The foyer smells of damp wool and old varnish. A fresh scrape marks the coat stand.'
+        if 'Plot ID: scene_1_plot_1' in prompt:
+            return 'You recover the ledger from behind the coats.'
+        if 'Plot ID: scene_1_plot_2' in prompt:
+            return 'The caretaker admits he saw a man limping toward the bridge.'
+        if 'Plot ID: scene_2_plot_1' in prompt:
+            return 'At the bridge, the witness waits beneath a dim lamp.'
         return 'The investigation continues.'
     if step_name == 'plot_summary_generation':
-        return '- The library lead ended with the obituary in hand.'
+        return '- The investigator resolved the active plot and secured a useful clue.'
     if step_name == 'scene_summary_generation':
-        return '- The scene closed after its active branch resolved.'
-    raise AssertionError(f'unexpected step_name={step_name}')
-
-
-def _make_scene(
-    scene_id: str,
-    scene_goal: str,
-    *,
-    node_kind: str,
-    navigation: dict,
-    status: str = 'pending',
-) -> dict:
-    plot_status = 'in_progress' if status == 'in_progress' else status
-    return {
-        'scene_id': scene_id,
-        'scene_goal': scene_goal,
-        'scene_description': scene_goal,
-        'status': status,
-        'scene_summary': '',
-        'node_kind': node_kind,
-        'navigation': navigation,
-        'plots': [
-            {
-                'plot_id': f'{scene_id}_plot_1',
-                'plot_goal': scene_goal,
-                'npc': [],
-                'locations': [],
-                'raw_text': scene_goal,
-                'status': plot_status,
-                'progress': 0.0,
-                'node_kind': node_kind,
-                'navigation': navigation,
-            }
-        ],
-    }
+        return '- The scene concluded after both ordered plots were resolved.'
+    return '{}'
 
 
 def _build_db(db_path: Path) -> Database:
     if db_path.exists():
         db_path.unlink()
     db = Database(str(db_path))
-    start_nav = default_navigation(completion_policy='all_required_then_advance')
-    start_nav['allowed_targets'] = [
-        make_target('scene', 'scene_library', label='Library', role='branch', required=True),
-        make_target('scene', 'scene_police', label='Police', role='branch', required=True),
-    ]
-    start_return = make_target('scene', 'scene_start', label='Start', role='return')
-    scenes = [
-        _make_scene('scene_start', 'Start hub', node_kind='hub', navigation=start_nav, status='in_progress'),
-        _make_scene(
-            'scene_library',
-            'Library branch',
-            node_kind='branch',
-            navigation={
-                'allowed_targets': [],
-                'return_target': start_return,
-                'completion_policy': 'terminal_on_resolve',
-                'prerequisites': [],
-                'close_unselected_on_advance': False,
+    db.insert_scenes(
+        [
+            {
+                'scene_id': 'scene_1',
+                'scene_index': 1,
+                'scene_name': 'Kimball House',
+                'scene_goal': 'Search the house for evidence',
+                'scene_description': 'The investigators move room by room through the quiet house.',
+                'scene_summary': '',
+                'status': 'in_progress',
+                'plots': [
+                    {
+                        'plot_id': 'scene_1_plot_1',
+                        'plot_index': 1,
+                        'plot_name': 'Check the foyer',
+                        'plot_goal': 'Find the first sign of disturbance',
+                        'raw_text': 'The foyer is dim, with muddy prints near the coat stand.',
+                        'status': 'in_progress',
+                        'progress': 0.0,
+                    },
+                    {
+                        'plot_id': 'scene_1_plot_2',
+                        'plot_index': 2,
+                        'plot_name': 'Search the study',
+                        'plot_goal': 'Recover any written evidence',
+                        'raw_text': 'The study desk is locked, but papers are scattered nearby.',
+                        'status': 'pending',
+                        'progress': 0.0,
+                    },
+                ],
             },
-        ),
-        _make_scene(
-            'scene_police',
-            'Police branch',
-            node_kind='branch',
-            navigation={
-                'allowed_targets': [],
-                'return_target': start_return,
-                'completion_policy': 'terminal_on_resolve',
-                'prerequisites': [],
-                'close_unselected_on_advance': False,
+            {
+                'scene_id': 'scene_2',
+                'scene_index': 2,
+                'scene_name': 'Riverside Bridge',
+                'scene_goal': 'Meet the witness',
+                'scene_description': 'Fog hangs low over the bridge.',
+                'scene_summary': '',
+                'status': 'pending',
+                'plots': [
+                    {
+                        'plot_id': 'scene_2_plot_1',
+                        'plot_index': 1,
+                        'plot_name': 'Question the witness',
+                        'plot_goal': 'Learn who fled the house',
+                        'raw_text': 'A nervous witness waits beneath the nearest lamp.',
+                        'status': 'pending',
+                        'progress': 0.0,
+                    }
+                ],
             },
-        ),
-    ]
-    db.insert_scenes(scenes)
+        ]
+    )
     db.update_system_state(
         {
             'stage': 'session',
-            'current_scene_id': 'scene_start',
-            'current_plot_id': 'scene_start_plot_1',
+            'current_scene_id': 'scene_1',
+            'current_plot_id': 'scene_1_plot_1',
             'plot_progress': 0.0,
             'scene_progress': 0.0,
-            'navigation_state': {},
-            'current_visit_id': 0,
-            'player_profile': {'name': 'Tester'},
+            'player_profile': {
+                'name': 'Tester',
+                'chosen_skill_allocations': {'occupation': ['Spot Hidden:70']},
+            },
         }
     )
     return db
 
 
 def main() -> int:
-    db_path = ROOT / 'test' / 'debug_agent_runtime_turn_state.db'
-    original_agent_llm = agent_graph_module.call_nvidia_llm
+    db_path = ROOT / 'test' / 'debug_agent_linear.db'
+    original_agent_llm = agent_graph_module.call_llm
     original_state_llm = state_module.call_nvidia_llm
     db = None
     try:
-        agent_graph_module.call_nvidia_llm = _agent_llm
-        state_module.call_nvidia_llm = _agent_llm
+        agent_graph_module.call_llm = _fake_llm
+        state_module.call_nvidia_llm = _fake_llm
 
         db = _build_db(db_path)
         agent = NarrativeAgent(db, DummyVectorStore())
         agent.set_debug_mode(True)
 
-        print('[test_agent_graph] case 1: initial response should store extracted turn_state in memory')
-        initial_result = agent.generate_initial_response()
-        opening_turns = db.get_recent_turns('scene_start', 'scene_start_plot_1', limit=5, visit_id=0)
-        assert initial_result.get('response'), 'initial response should exist'
-        assert opening_turns, 'initial opening should be written to memory'
-        assert opening_turns[-1]['turn_state']['choice_open'] is True
-        offered_ids = {target['target_id'] for target in opening_turns[-1]['turn_state']['offered_targets']}
-        assert offered_ids == {'scene_library', 'scene_police'}
-        pre_prompt = next(
-            (item.get('prompt', '') for item in agent.latest_debug_prompts if item.get('name') == 'turn_state_prompt'),
-            '',
-        )
-        assert pre_prompt, 'turn_state extraction prompt should be recorded in debug mode'
+        print('[test_agent_graph] case 1: initial response should open the first plot')
+        initial = agent.generate_initial_response()
+        assert initial.get('response'), 'opening response should exist'
+        opening_turns = db.get_recent_turns('scene_1', 'scene_1_plot_1', limit=5, visit_id=0)
+        assert opening_turns, 'opening narration should be written to memory'
 
-        print('[test_agent_graph] case 2: pre-response transition should consume structured intent and enter the branch')
-        handoff = agent.run_turn('I go to the library.')
-        handoff_prompt = next(
-            (item.get('prompt', '') for item in handoff.get('debug_prompts', []) if item.get('name') == 'pre_response_transition_prompt'),
-            '',
-        )
-        handoff_response_prompt = next(
-            (item.get('prompt', '') for item in handoff.get('debug_prompts', []) if item.get('name') == 'generate_response_prompt'),
-            '',
-        )
-        system_after_handoff = db.get_system_state()
-        assert handoff.get('pre_response_transition_applied') is True
-        assert system_after_handoff['current_scene_id'] == 'scene_library'
-        assert handoff_prompt and 'choice_open=true' in handoff_prompt
-        assert handoff.get('response') == 'You step into the library archives, where dust hangs over the obituary index.'
-        assert 'Input Consumed By Transition:\ntrue' in handoff_response_prompt
-        assert 'Transition Trigger Input:\nI go to the library.' in handoff_response_prompt
-        assert 'Player Input:\n\n' in handoff_response_prompt
+        print('[test_agent_graph] case 2: resolving the first plot should advance to the next plot in order')
+        first_turn = agent.run_turn('I inspect the coat stand carefully.')
+        system_after_first = db.get_system_state()
+        assert first_turn.get('pre_response_transition_applied') is False
+        assert system_after_first['current_scene_id'] == 'scene_1'
+        assert system_after_first['current_plot_id'] == 'scene_1_plot_2'
+        assert db.get_summary('plot', scene_id='scene_1', plot_id='scene_1_plot_1'), 'plot 1 summary should be stored'
 
-        print('[test_agent_graph] case 3: off-topic turns should stay put and update redirect guidance')
-        off_topic = agent.run_turn('I ask about the weather.')
-        library_turns = db.get_recent_turns('scene_library', 'scene_library_plot_1', limit=5, visit_id=1)
-        off_topic_state = db.get_system_state()
-        guidance = off_topic_state['navigation_state']['plot_guidance']['scene_library_plot_1::1']
-        assert off_topic_state['current_scene_id'] == 'scene_library'
-        assert guidance['redirect_streak'] == 1
-        assert library_turns[-1]['turn_state']['choice_open'] is False
-        assert off_topic.get('plot_advance_action') == 'stay'
-
-        print('[test_agent_graph] case 4: wrapped branches should return to the parent hub after write_memory + completion')
-        wrapped = agent.run_turn('I search the shelves for the obituary.')
-        wrapped_state = db.get_system_state()
-        library_turns = db.get_recent_turns('scene_library', 'scene_library_plot_1', limit=8, visit_id=1)
-        assert wrapped_state['current_scene_id'] == 'scene_start'
-        assert wrapped_state['current_plot_id'] == 'scene_start_plot_1'
-        assert wrapped_state['current_visit_id'] == 2
-        assert library_turns[-1]['turn_state']['beat_status'] == 'wrapped'
-        assert wrapped.get('scene_id') == 'scene_start'
-
-        print('[test_agent_graph] case 5: roll checks should trigger only from llm output')
-        roll_state = {
-            'roll_check_prompt': 'ROLL_TRIGGER_TEST',
-            'need_check': False,
-            'check_skill': '',
-            'check_reason': '',
-            'dice_type': '',
-            'dice_result': None,
-            'skill_check_result': None,
-            'resolved_check_summary': '',
-        }
-        roll_state = agent.check_whether_roll_dice(roll_state)
-        assert roll_state.get('need_check') is True
-        assert roll_state.get('check_skill') == 'Spot Hidden'
-        assert roll_state.get('check_reason') == 'llm_requests_check'
-        assert roll_state.get('dice_type') == '1d100'
-
-        print('[test_agent_graph] case 6: invalid roll-check json should conservatively avoid marker fallback')
-        invalid_roll_state = {
-            'roll_check_prompt': 'ROLL_INVALID_TEST',
-            'need_check': False,
-            'check_skill': '',
-            'check_reason': '',
-            'dice_type': '',
-            'dice_result': None,
-            'skill_check_result': None,
-            'resolved_check_summary': '',
-            'latest_agent_turn_excerpt': 'Make a Spot Hidden check.',
-            'current_plot_raw_text': 'This scene requires a Spot Hidden roll.',
-            'latest_alignment': 'current_plot',
-            'player_profile': {'chosen_skill_allocations': {'occupation': ['Spot Hidden:70']}},
-        }
-        invalid_roll_state = agent.check_whether_roll_dice(invalid_roll_state)
-        assert invalid_roll_state.get('need_check') is False
-        assert invalid_roll_state.get('check_skill') == ''
-        assert invalid_roll_state.get('check_reason') == ''
-        assert invalid_roll_state.get('dice_type') == ''
+        print('[test_agent_graph] case 3: resolving the last plot should advance to the next scene')
+        second_turn = agent.run_turn('I question the caretaker about the ledger.')
+        system_after_second = db.get_system_state()
+        assert second_turn.get('pre_response_transition_applied') is False
+        assert system_after_second['current_scene_id'] == 'scene_2'
+        assert system_after_second['current_plot_id'] == 'scene_2_plot_1'
+        assert db.get_summary('scene', scene_id='scene_1'), 'scene 1 summary should be stored'
 
         print('[test_agent_graph] result: PASS')
         return 0
@@ -287,7 +178,7 @@ def main() -> int:
         print(f'[test_agent_graph] result: FAIL -> {exc}')
         return 1
     finally:
-        agent_graph_module.call_nvidia_llm = original_agent_llm
+        agent_graph_module.call_llm = original_agent_llm
         state_module.call_nvidia_llm = original_state_llm
         if db is not None:
             db.close()
