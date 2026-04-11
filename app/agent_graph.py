@@ -145,6 +145,9 @@ Previous Plot Summary:
 Current Scene Summary:
 {current_scene_summary}
 
+Long-Term Memory:
+{long_term_memory}
+
 Recent Conversation:
 {recent_conversation}
 
@@ -282,8 +285,9 @@ BRANCH_TRANSITION_PROMPT_TEMPLATE = """Your task is to decide whether to:
 
 ### Core Principle
 
-- Scene transitions represent narrative progression, not necessarily a change in location
-- The decision must be grounded in the Current Plot Raw Text
+- Scene transitions represent narrative progression. 
+- A change in location usually indicates a scene transition, unless clearly part of the same scene.
+- The decision must be grounded in the Current Plot Raw Text and Player Explicit Decision.
 
 ---
 
@@ -294,6 +298,8 @@ Switch (move to another plot or scene) if ANY of the following is true:
 1. Explicit user intent
 
 - The user clearly expresses intent to move to another place or activity
+- This ALWAYS triggers a switch, regardless of the current scene or plot state
+- If the user previously expressed such intent but the system did not switch, and the current scene does not match that intent, you MUST switch now.
 - Example: "I leave and go to the library"
 
 2. The current scene is sufficiently explored
@@ -304,33 +310,9 @@ A scene is considered sufficiently explored when:
   OR  
 - The player has attempted relevant actions but no further useful information can be obtained
 
-AND:
+This judgment of sufficiently explored is based on the Current Plot Raw Text, NOT on newly generated narrative content.
 
-- This judgment is based ONLY on the Current Plot Raw Text  
-- NOT on newly generated narrative content
-
----
-
-### Target Selection Rule
-
-When selecting the next scene:
-
-- Prefer scenes that appear earlier in the provided unvisited scene list  
-- If multiple scenes seem equally relevant, choose the earlier one  
-- Later scenes typically represent follow-up content that depends on earlier scenes being explored  
-
----
-
-### Default Behavior (IMPORTANT)
-
-- If you are uncertain → ADVANCE (switch)
-- Only STAY if BOTH conditions are clearly true:
-  - There is remaining meaningful information in the Current Plot Raw Text
-  - The player is actively interacting with that remaining content
-
----
-
-### Examples of "sufficiently explored"
+Examples of "sufficiently explored"
 
 - The Current Plot Raw Text no longer provides new actionable information
 - The player has completed the main interactions (e.g., asking key questions, checking obvious locations)
@@ -340,12 +322,34 @@ When selecting the next scene:
 
 ---
 
-### Critical Constraints
+### Conflict Resolution (CRITICAL)
 
-- The Current Plot Raw Text is the ONLY authoritative source for determining completeness
-- Recent Conversation is used ONLY to understand player intent
-- Do NOT treat newly generated narrative as new evidence
-- Do NOT infer additional content beyond the Current Plot Raw Text
+- If there is ANY conflict between:
+  - player intent or movement
+  - sufficiently explored
+
+→ ALWAYS follow player intent (SWITCH)
+
+--
+
+### Target Selection Rule
+
+When selecting the next scene:
+
+- Choose the scene that best matches the script progression and the player's intended location or activity.
+- If multiple candidates exist:
+  - Prefer unvisited scenes
+  - If still tied, choose the **earlier** one in the list. Later scenes typically depend on earlier ones and should not be selected first.
+
+---
+
+### Default Behavior (IMPORTANT)
+
+- If you are uncertain whether the scene is complete → SWITCH to the next scene
+- If the user moves to a different location → SWITCH
+- Only STAY if BOTH conditions are clearly true:
+  - There is remaining meaningful information in the Current Plot Raw Text
+  - The player is actively interacting with that remaining content
 
 ---
 
@@ -357,15 +361,18 @@ When selecting the next scene:
 
 ### Notes
 
-- Scene transitions are narrative (temporal or logical), not spatial
+- Scene transitions are narrative (temporal or logical), not purely spatial
 - Revisiting scenes/plots is allowed but uncommon
 
 ---
 
 Inputs:
 
-Recent Conversation (last 3 rounds):
+Recent Conversation (last 3 rounds, from previous to latest):
 {global_recent_conversation}
+
+Long-Term Memory:
+{long_term_memory}
 
 Current Plot Raw Text:
 {current_plot_raw_text}
@@ -389,6 +396,40 @@ Unvisited Plots (within current scene):
 
 Visited Plots (within current scene):
 {visited_plots}
+"""
+
+LONG_TERM_MEMORY_UPDATE_PROMPT_TEMPLATE = """The conversation has been updated. Update the long-term memory by summarizing the current story state.
+
+Goal:
+Produce a concise summary that supports reasoning, branch decisions, and response generation, while preserving all information relevant to story progression. 
+
+Instructions:
+- Merge the previous long_term_memory with the recent conversation.
+- Produce a concise summary, but preserve all information that is relevant to story progression and decision-making.
+- Do not omit important details in order to shorten the summary.
+- Explicitly track:
+  1. User actions (what the player has done)
+  2. Confirmed information (facts learned from the world or NPCs)
+  3. Clues (potentially important hints or leads)
+  4. User hypotheses (player assumptions, guesses, or interpretations)
+
+Requirements:
+- Maximum 4 sentences.
+- Use clear and explicit language.
+- Avoid vague phrases (e.g., "some exploration", "various actions").
+- Preserve important entities (names, locations, objects).
+- Do NOT introduce new information not present in the conversation.
+
+Input:
+
+Current long-term memory:
+{current_long_term_memory}
+
+Recent conversation (last 3 rounds):
+{recent_conversation}
+
+Output:
+Updated long-term memory (<= 4 sentences, cumulative and state-focused).
 """
 
 KP_OPENING_MARKER = '[KP_OPENING]'
@@ -422,6 +463,7 @@ class NarrativeState(TypedDict, total=False):
     clue: str
     previous_plot_summary: str
     current_scene_summary: str
+    long_term_memory: str
     visited_scenes: list[str]
     visited_plots: list[str]
     transition_switch: bool
@@ -496,6 +538,7 @@ class NarrativeAgent:
             'current_plot_raw_text': '',
             'setting': 'None',
             'clue': 'None',
+            'long_term_memory': '',
             'dice_result': None,
             'skill_check_result': None,
             'need_check': False,
@@ -667,6 +710,7 @@ class NarrativeAgent:
         visited_plots = nav.get('visited_plots', [])
         state['visited_scenes'] = [str(item) for item in visited_scenes if str(item)]
         state['visited_plots'] = [str(item) for item in visited_plots if str(item)]
+        state['long_term_memory'] = str(nav.get('long_term_memory', '') or '')
 
     def _save_visited_state(self, state: NarrativeState) -> None:
         navigation_state = self.db.get_system_state().get('navigation_state', {}) or {}
@@ -674,6 +718,9 @@ class NarrativeAgent:
             {
                 'visited_scenes': sorted(set(state.get('visited_scenes', []))),
                 'visited_plots': sorted(set(state.get('visited_plots', []))),
+                'long_term_memory': str(
+                    state.get('long_term_memory', navigation_state.get('long_term_memory', '')) or ''
+                ),
             }
         )
         self.db.update_system_state(
@@ -731,6 +778,7 @@ class NarrativeAgent:
         return BRANCH_TRANSITION_PROMPT_TEMPLATE.format(
             branch_decision_json='{\n  "switch": true/false,\n  "target_plot_id": "scene_x_plot_y" or ""\n}',
             global_recent_conversation=self._format_recent_conversation(branch_history, rounds=3),
+            long_term_memory=state.get('long_term_memory', '') or 'None',
             current_plot_raw_text=state.get('current_plot_raw_text', '') or 'None',
             current_scene=self._json_dumps(self._scene_brief(current_scene)),
             unvisited_scenes=self._json_dumps([self._scene_brief(scene) for scene in scenes if str(scene.get('scene_id', '')) not in visited_scenes]),
@@ -818,7 +866,7 @@ class NarrativeAgent:
         state['setting'] = categorized['setting']
         state['clue'] = categorized['clue']
         player_skill_list = self._format_player_skill_list(state)
-        recent_conversation = self._format_recent_conversation(state.get('conversation_history', []), rounds=3)
+        recent_conversation = self._format_recent_conversation(state.get('global_conversation_history', []), rounds=2)
         state['roll_check_prompt'] = ROLL_CHECK_PROMPT_TEMPLATE.format(
             user_input=state['latest_user_input'],
             scene_id=state.get('scene_id', ''),
@@ -917,6 +965,7 @@ class NarrativeAgent:
                 current_plot_raw_text=state.get('current_plot_raw_text', '') or 'None',
                 previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
                 current_scene_summary=state.get('current_scene_summary', '') or 'None',
+                long_term_memory=state.get('long_term_memory', '') or 'None',
                 recent_conversation=recent_conversation,
                 npc_related_info=categorized['npc_related_info'],
                 player_related_info=str(state.get('player_profile', {})),
@@ -952,8 +1001,32 @@ class NarrativeAgent:
                 scene_summary = self._build_scene_summary(state.get('previous_scene_id', ''), state=state)
                 self.db.update_scene(state.get('previous_scene_id', ''), {'scene_summary': scene_summary})
                 self.db.save_summary('scene', scene_summary, scene_id=state.get('previous_scene_id', ''))
+        self._update_long_term_memory(state)
         self._save_visited_state(state)
         return state
+
+    def _update_long_term_memory(self, state: NarrativeState) -> None:
+        row = self.db.conn.execute(
+            "SELECT COUNT(*) AS turn_count FROM memory WHERE user <> ?",
+            (KP_OPENING_MARKER,),
+        ).fetchone()
+        turn_count = int(row['turn_count']) if row else 0
+        if turn_count <= 0 or turn_count % 3 != 0:
+            return
+
+        recent_history = self.db.get_global_recent_turns(limit=3)
+        prompt = LONG_TERM_MEMORY_UPDATE_PROMPT_TEMPLATE.format(
+            current_long_term_memory=state.get('long_term_memory', '') or 'None',
+            recent_conversation=self._format_recent_conversation(recent_history, rounds=3),
+        )
+        self._record_prompt(state, 'long_term_memory_update_prompt', prompt)
+        try:
+            updated_memory = self._llm_call(prompt, step_name='long_term_memory_update')
+        except Exception as exc:
+            logger.error("Long-term memory update failed error=%s", exc)
+            return
+        if updated_memory:
+            state['long_term_memory'] = updated_memory
 
     def _roll_dice_expr(self, dice_expr: str) -> str | None:
         m = re.fullmatch(r'\s*(\d*)d(\d+)\s*', (dice_expr or '').lower())
