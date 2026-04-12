@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+from collections import Counter
 import json5
 import re
 from dataclasses import dataclass
@@ -11,14 +11,6 @@ from app.llm_client import call_llm
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
 MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 DECORATIVE_HTML_RE = re.compile(r"^</?div\b[^>]*>$|^<img\b[^>]*>$|^<div\b[^>]*><img\b.*</div>$", re.I)
-AUXILIARY_PLOT_MARKERS = (
-    "two investigators",
-    "keeper note",
-    "keeper notes",
-    "keeper information",
-    "concerning ",
-    "appendix",
-)
 KNOWLEDGE_TYPES = {"setting", "npc", "clue", "other"}
 LLM_PROMPT_TEMPLATE = """You are an information extraction assistant.
 
@@ -313,14 +305,23 @@ def read_uploaded_document(file_name: str, file_bytes: bytes, mime_type: str | N
     return read_markdown_document(file_bytes, file_name=file_name)
 
 
-def parse_script(pages: list[str], llm_client: Callable[[str], str] | None = None) -> list[dict[str, Any]]:
-    return parse_script_bundle(pages=pages, llm_client=llm_client)["scenes"]
+def parse_script(
+    pages: list[str],
+    llm_client: Callable[[str], str] | None = None,
+    scene_heading_levels: tuple[int, ...] | list[int] | set[int] | None = None,
+) -> list[dict[str, Any]]:
+    return parse_script_bundle(
+        pages=pages,
+        llm_client=llm_client,
+        scene_heading_levels=scene_heading_levels,
+    )["scenes"]
 
 
 def parse_script_bundle(
     pages: list[str] | None = None,
     llm_client: Callable[[str], str] | None = None,
     source_document: SourceDocument | None = None,
+    scene_heading_levels: tuple[int, ...] | list[int] | set[int] | None = None,
 ) -> dict[str, Any]:
     # Read the full Markdown document once and parse every scene section with the same prompt.
     if source_document is None:
@@ -330,8 +331,7 @@ def parse_script_bundle(
         raise ValueError("Only Markdown input is supported")
 
     llm = llm_client or (lambda prompt: call_llm(prompt, step_name="parser_extract"))
-    summary_llm = llm_client or (lambda prompt: call_llm(prompt, step_name="parser_script_summary"))
-    sections = _build_scene_sections(source_document)
+    sections = _build_scene_sections(source_document, scene_heading_levels=scene_heading_levels)
     scenes: list[dict[str, Any]] = []
     knowledge: list[dict[str, Any]] = []
     knowledge_counter = 0
@@ -349,7 +349,6 @@ def parse_script_bundle(
         has_scene = _has_scene_payload(scene_payload)
         normalized_plots = [plot for plot in parsed_plots if isinstance(plot, dict) and _has_plot_payload(plot)]
         if has_scene:
-            plot_spans = section["plot_spans"] or [{"title": section["title"], "raw_text": raw_text}]
             scene_name = _coerce_text(scene_payload.get("scene_name"), section["title"] or f"Scene {scene_index}")
             scene_record = {
                 "scene_id": f"scene_{scene_index}",
@@ -363,15 +362,14 @@ def parse_script_bundle(
             }
 
             for plot_index, plot_payload in enumerate(normalized_plots, start=1):
-                plot_span = plot_spans[min(plot_index - 1, len(plot_spans) - 1)] if plot_spans else {"title": "", "raw_text": raw_text}
-                plot_name = _coerce_text(plot_payload.get("plot_name"), plot_span.get("title", "") or f"Plot {plot_index}")
+                plot_name = _coerce_text(plot_payload.get("plot_name"), f"Plot {plot_index}")
                 scene_record["plots"].append(
                     {
                         "plot_id": f"scene_{scene_index}_plot_{plot_index}",
                         "plot_index": plot_index,
                         "plot_name": plot_name,
                         "plot_goal": _coerce_text(plot_payload.get("plot_goal"), plot_name),
-                        "raw_text": str(plot_span.get("raw_text", raw_text)),
+                        "raw_text": raw_text,
                         "status": "pending",
                         "progress": 0.0,
                     }
@@ -407,15 +405,23 @@ def parse_script_bundle(
     }
 
 
-def _build_scene_sections(document: SourceDocument) -> list[dict[str, Any]]:
+def _build_scene_sections(
+    document: SourceDocument,
+    scene_heading_levels: tuple[int, ...] | list[int] | set[int] | None = None,
+) -> list[dict[str, Any]]:
     headings = _collect_headings(document.raw_units)
     if not headings:
         raw_text = document.text.strip()
-        return [{"title": "Scene 1", "raw_text": raw_text, "plot_spans": [{"title": "Plot 1", "raw_text": raw_text}]}] if raw_text else []
+        return [{"title": "Scene 1", "raw_text": raw_text}] if raw_text else []
 
+    allowed_levels = _resolve_scene_heading_levels(
+        headings,
+        document.raw_units,
+        scene_heading_levels=scene_heading_levels,
+    )
     scene_starts: list[dict[str, Any]] = []
     for index, heading in enumerate(headings):
-        if heading["level"] not in {3, 4}:
+        if heading["level"] not in allowed_levels:
             continue
         section_end = len(document.raw_units)
         for next_heading in headings[index + 1 :]:
@@ -436,7 +442,7 @@ def _build_scene_sections(document: SourceDocument) -> list[dict[str, Any]]:
 
     if not scene_starts:
         raw_text = document.text.strip()
-        return [{"title": "Scene 1", "raw_text": raw_text, "plot_spans": [{"title": "Plot 1", "raw_text": raw_text}]}] if raw_text else []
+        return [{"title": "Scene 1", "raw_text": raw_text}] if raw_text else []
 
     sections: list[dict[str, Any]] = []
     for index, scene_start in enumerate(scene_starts):
@@ -445,9 +451,64 @@ def _build_scene_sections(document: SourceDocument) -> list[dict[str, Any]]:
         raw_text = _slice_lines(document.raw_units, section_start, section_end).strip()
         if not raw_text:
             continue
-        plot_spans = _build_plot_spans(document.raw_units, headings, section_start, section_end, scene_start["title"])
-        sections.append({"title": scene_start["title"], "raw_text": raw_text, "plot_spans": plot_spans})
+        sections.append({"title": scene_start["title"], "raw_text": raw_text})
     return sections
+
+
+def _resolve_scene_heading_levels(
+    headings: list[dict[str, Any]],
+    raw_units: tuple[str, ...],
+    scene_heading_levels: tuple[int, ...] | list[int] | set[int] | None = None,
+) -> set[int]:
+    if scene_heading_levels is not None:
+        normalized_levels = {int(level) for level in scene_heading_levels if 1 <= int(level) <= 6}
+        if not normalized_levels:
+            raise ValueError("scene_heading_levels must contain Markdown heading levels between 1 and 6")
+        return normalized_levels
+
+    candidate_headings = [
+        heading
+        for index, heading in enumerate(headings)
+        if _heading_has_direct_body_content(headings, raw_units, index)
+    ]
+    if not candidate_headings:
+        return {heading["level"] for heading in headings}
+
+    candidate_levels = sorted({heading["level"] for heading in candidate_headings})
+    level_counts = Counter(heading["level"] for heading in candidate_headings)
+
+    # Skip a lone document title such as "# Scenario Name" when deeper sections exist.
+    if len(candidate_levels) > 1 and level_counts.get(candidate_levels[0], 0) == 1:
+        candidate_levels = candidate_levels[1:] or candidate_levels
+
+    # When the document uses many nested heading depths, treat the deepest level as detail text rather than scene splits.
+    if len(candidate_levels) > 2:
+        candidate_levels = candidate_levels[:-1]
+
+    return set(candidate_levels)
+
+
+def _heading_has_direct_body_content(
+    headings: list[dict[str, Any]],
+    raw_units: tuple[str, ...],
+    heading_index: int,
+) -> bool:
+    heading = headings[heading_index]
+    section_end = len(raw_units)
+    for next_heading in headings[heading_index + 1 :]:
+        if next_heading["level"] <= heading["level"]:
+            section_end = next_heading["line_no"] - 1
+            break
+
+    direct_body_end = section_end
+    for next_heading in headings[heading_index + 1 :]:
+        if next_heading["line_no"] > section_end:
+            break
+        if next_heading["level"] > heading["level"]:
+            direct_body_end = next_heading["line_no"] - 1
+            break
+
+    return _has_meaningful_markdown_content(raw_units, heading["line_no"], direct_body_end)
 
 
 def _collect_headings(raw_units: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -679,8 +740,3 @@ def _normalize_markdown_heading(text: str) -> str:
     normalized = re.sub(r"\s+", " ", (text or "").strip())
     normalized = normalized.strip("# ").strip()
     return normalized or "Untitled"
-
-
-def _is_auxiliary_plot_title(title: str) -> bool:
-    normalized = (title or "").strip().lower()
-    return any(normalized.startswith(marker) or marker in normalized for marker in AUXILIARY_PLOT_MARKERS)
