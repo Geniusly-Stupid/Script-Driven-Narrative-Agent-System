@@ -991,6 +991,7 @@ def run_app() -> None:
                 bundle = parse_script_bundle(source_document=document)
                 scenes = bundle.get('scenes', [])
                 knowledge = bundle.get('knowledge', [])
+                script_summary = str(bundle.get('script_summary', '') or '')
                 source_metadata = bundle.get('source_metadata', {})
 
                 _render_loading_state(parse_loading, 'Preparing the world...', centered=True)
@@ -999,6 +1000,7 @@ def run_app() -> None:
                 db.insert_scenes(scenes)
                 db.insert_knowledge(knowledge)
                 vector.add_from_scenes(scenes, knowledge=knowledge)
+                db.save_summary('script', script_summary)
                 db.save_summary('parse_source_meta', json.dumps(source_metadata, ensure_ascii=False))
 
                 first_scene, first_plot = _first_playable_position(scenes)
@@ -1045,6 +1047,7 @@ def run_app() -> None:
         plot_count = sum(len(scene.get('plots', [])) for scene in scenes)
         est_minutes = plot_count * 10
         source_meta_raw = db.get_summary('parse_source_meta')
+        script_summary = db.get_summary('script')
         try:
             source_meta = json.loads(source_meta_raw) if source_meta_raw else {}
         except Exception:
@@ -1054,6 +1057,9 @@ def run_app() -> None:
             if source_meta:
                 st.markdown('#### Source Metadata')
                 st.write(source_meta)
+            if script_summary:
+                st.markdown('#### Script Summary')
+                st.write(script_summary)
 
             for scene in scenes:
                 st.write(

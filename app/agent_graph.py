@@ -135,6 +135,10 @@ Current Plot Raw Text:
 This is the most important reference. It is from the original script. Please read it carefully and follow the instructions provided.
 {current_plot_raw_text}
 
+Global Story Summary: 
+This provides an overview of the entire story. You should progress the narrative according to this main storyline.
+{script_summary}
+
 ---
 
 # MEMORY
@@ -378,6 +382,15 @@ Current Plot Raw Text:
 {current_plot_raw_text}
 
 ---
+
+Global Story Summary:
+This defines the main storyline. 
+Base your scene and plot transition decisions on this summary to ensure the narrative progresses smoothly and in the intended direction. 
+Do not switch to content that significantly deviates from the main progression.
+
+{script_summary}
+
+---
 Current Scene:
 {current_scene}
 
@@ -464,6 +477,7 @@ class NarrativeState(TypedDict, total=False):
     previous_plot_summary: str
     current_scene_summary: str
     long_term_memory: str
+    script_summary: str
     visited_scenes: list[str]
     visited_plots: list[str]
     transition_switch: bool
@@ -539,6 +553,7 @@ class NarrativeAgent:
             'setting': 'None',
             'clue': 'None',
             'long_term_memory': '',
+            'script_summary': '',
             'dice_result': None,
             'skill_check_result': None,
             'need_check': False,
@@ -747,6 +762,7 @@ class NarrativeAgent:
         state['plot_goal'] = ''
         state['current_plot_raw_text'] = ''
         state['previous_plot_summary'] = ''
+        state['script_summary'] = self.db.get_summary('script')
         if not scene:
             return
         state['scene_name'] = scene.get('scene_name', '')
@@ -778,6 +794,7 @@ class NarrativeAgent:
         return BRANCH_TRANSITION_PROMPT_TEMPLATE.format(
             branch_decision_json='{\n  "switch": true/false,\n  "target_plot_id": "scene_x_plot_y" or ""\n}',
             global_recent_conversation=self._format_recent_conversation(branch_history, rounds=3),
+            script_summary=state.get('script_summary', '') or 'None',
             long_term_memory=state.get('long_term_memory', '') or 'None',
             current_plot_raw_text=state.get('current_plot_raw_text', '') or 'None',
             current_scene=self._json_dumps(self._scene_brief(current_scene)),
@@ -966,6 +983,7 @@ class NarrativeAgent:
                 previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
                 current_scene_summary=state.get('current_scene_summary', '') or 'None',
                 long_term_memory=state.get('long_term_memory', '') or 'None',
+                script_summary=state.get('script_summary', '') or 'None',
                 recent_conversation=recent_conversation,
                 npc_related_info=categorized['npc_related_info'],
                 player_related_info=str(state.get('player_profile', {})),

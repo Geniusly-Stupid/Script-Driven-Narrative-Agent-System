@@ -61,6 +61,10 @@ def main() -> int:
 
     def mock_llm(prompt: str) -> str:
         prompts.append(prompt)
+        if "You are summarizing a narrative script." in prompt:
+            assert "New input (scene & plots):" in prompt
+            return "The investigation moves through several connected scenes as the player follows leads and interviews sources. Key actions include asking around, talking to the police, and pursuing multiple lines of inquiry. Important discoveries point toward the cemetery, the missing books, and Douglas Kimball's disappearance."
+
         assert "You are an information extraction assistant." in prompt
         assert "Return only JSON. Do not include explanations." in prompt
         assert "--- BEGIN INPUT ---" in prompt
@@ -122,11 +126,13 @@ def main() -> int:
 
         scenes = bundle.get("scenes", [])
         knowledge = bundle.get("knowledge", [])
+        script_summary = bundle.get("script_summary", "")
         source_meta = bundle.get("source_metadata", {})
 
         assert source_meta.get("source_type") == "markdown"
         assert source_meta.get("line_count") == len(markdown_text.split("\n"))
         assert len(knowledge) == 1
+        assert "The investigation moves through several connected scenes" in script_summary
 
         assert len(scenes) == 5
         assert [scene.get("scene_name", "") for scene in scenes] == ["Extracted Scene"] * 5
@@ -148,6 +154,8 @@ def main() -> int:
 
         def truncation_llm(prompt: str) -> str:
             long_prompts.append(prompt)
+            if "You are summarizing a narrative script." in prompt:
+                return "A long scene summary."
             return json.dumps(
                 {
                     "scene": {
@@ -176,22 +184,27 @@ def main() -> int:
 
         empty_bundle = parse_script_bundle(
             source_document=markdown_doc,
-            llm_client=lambda prompt: json.dumps(
-                {
-                    "scene": {},
-                    "plots": [],
-                    "knowledge": [
-                        {
-                            "knowledge_type": "setting",
-                            "title": "Background",
-                            "content": "Knowledge-only content.",
-                        }
-                    ],
-                }
+            llm_client=lambda prompt: (
+                ""
+                if "You are summarizing a narrative script." in prompt
+                else json.dumps(
+                    {
+                        "scene": {},
+                        "plots": [],
+                        "knowledge": [
+                            {
+                                "knowledge_type": "setting",
+                                "title": "Background",
+                                "content": "Knowledge-only content.",
+                            }
+                        ],
+                    }
+                )
             ),
         )
         assert empty_bundle["scenes"] == []
         assert len(empty_bundle["knowledge"]) == 5
+        assert empty_bundle["script_summary"] == ""
 
         print("[test_parser] result: PASS")
         return 0

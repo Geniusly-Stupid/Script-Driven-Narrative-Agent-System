@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import json5
 import re
 from dataclasses import dataclass
@@ -183,6 +184,27 @@ Return only JSON. Do not include explanations.
 --- END INPUT ---
 """
 
+SCRIPT_SUMMARY_PROMPT_TEMPLATE = """You are summarizing a narrative script.
+
+Existing summary:
+{script_summary}
+
+New input (scene & plots):
+{structured_scene_plot_json}
+
+Task:
+Update the global story summary.
+
+Requirements:
+- The final summary must be 3–4 sentences in total
+- Focus on main storyline, key actions, and discoveries
+- If existing summary is not empty, refine and compress it while incorporating new information
+- Avoid repeating content
+- Keep the summary concise and coherent
+"""
+
+SCRIPT_SUMMARY_INPUT_LIMIT = 10000
+
 
 @dataclass(frozen=True)
 class SourceSegment:
@@ -308,6 +330,7 @@ def parse_script_bundle(
         raise ValueError("Only Markdown input is supported")
 
     llm = llm_client or (lambda prompt: call_llm(prompt, step_name="parser_extract"))
+    summary_llm = llm_client or (lambda prompt: call_llm(prompt, step_name="parser_script_summary"))
     sections = _build_scene_sections(source_document)
     scenes: list[dict[str, Any]] = []
     knowledge: list[dict[str, Any]] = []
@@ -369,9 +392,12 @@ def parse_script_bundle(
                 }
             )
 
+    script_summary = _build_script_summary(scenes, summary_llm)
+
     return {
         "scenes": scenes,
         "knowledge": knowledge,
+        "script_summary": script_summary,
         "source_metadata": {
             "source_file_name": source_document.source_file_name,
             "source_type": source_document.source_type,
@@ -511,6 +537,68 @@ def _build_plot_spans(
             }
         )
     return plot_spans or [{"title": scene_title, "raw_text": _slice_lines(raw_units, section_start, section_end)}]
+
+
+def _build_script_summary(
+    scenes: list[dict[str, Any]],
+    llm: Callable[[str], str],
+) -> str:
+    structured_scenes = _build_script_summary_payload(scenes)
+    if not structured_scenes:
+        return ""
+
+    script_summary = ""
+    for batch in _split_script_summary_batches(structured_scenes):
+        prompt = SCRIPT_SUMMARY_PROMPT_TEMPLATE.format(
+            script_summary=script_summary,
+            structured_scene_plot_json=json.dumps(batch, ensure_ascii=False),
+        )
+        updated_summary = str(llm(prompt) or "").strip()
+        if updated_summary:
+            script_summary = updated_summary
+    return script_summary
+
+
+def _build_script_summary_payload(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for scene in scenes:
+        payload.append(
+            {
+                "scene_name": _coerce_text(scene.get("scene_name"), ""),
+                "scene_goal": _coerce_text(scene.get("scene_goal"), ""),
+                "scene_description": _coerce_text(scene.get("scene_description"), ""),
+                "plots": [
+                    {
+                        "plot_name": _coerce_text(plot.get("plot_name"), ""),
+                        "plot_goal": _coerce_text(plot.get("plot_goal"), ""),
+                    }
+                    for plot in scene.get("plots", [])
+                    if isinstance(plot, dict)
+                ],
+            }
+        )
+    return payload
+
+
+def _split_script_summary_batches(
+    structured_scenes: list[dict[str, Any]],
+    max_chars: int = SCRIPT_SUMMARY_INPUT_LIMIT,
+) -> list[list[dict[str, Any]]]:
+    batches: list[list[dict[str, Any]]] = []
+    current_batch: list[dict[str, Any]] = []
+
+    for scene in structured_scenes:
+        candidate_batch = current_batch + [scene]
+        candidate_text = json.dumps(candidate_batch, ensure_ascii=False)
+        if current_batch and len(candidate_text) > max_chars:
+            batches.append(current_batch)
+            current_batch = [scene]
+            continue
+        current_batch = candidate_batch
+
+    if current_batch:
+        batches.append(current_batch)
+    return batches
 
 
 def _slice_lines(raw_units: tuple[str, ...], first_row: int, last_row: int) -> str:
