@@ -331,6 +331,7 @@ def parse_script_bundle(
         raise ValueError("Only Markdown input is supported")
 
     llm = llm_client or (lambda prompt: call_llm(prompt, step_name="parser_extract"))
+    summary_llm = lambda prompt: call_llm(prompt, step_name="parser_script_summary")
     sections = _build_scene_sections(source_document, scene_heading_levels=scene_heading_levels)
     scenes: list[dict[str, Any]] = []
     knowledge: list[dict[str, Any]] = []
@@ -349,6 +350,7 @@ def parse_script_bundle(
         has_scene = _has_scene_payload(scene_payload)
         normalized_plots = [plot for plot in parsed_plots if isinstance(plot, dict) and _has_plot_payload(plot)]
         if has_scene:
+            plot_spans = section["plot_spans"] or [{"title": section["title"], "raw_text": raw_text}]
             scene_name = _coerce_text(scene_payload.get("scene_name"), section["title"] or f"Scene {scene_index}")
             scene_record = {
                 "scene_id": f"scene_{scene_index}",
@@ -362,14 +364,15 @@ def parse_script_bundle(
             }
 
             for plot_index, plot_payload in enumerate(normalized_plots, start=1):
-                plot_name = _coerce_text(plot_payload.get("plot_name"), f"Plot {plot_index}")
+                plot_span = plot_spans[min(plot_index - 1, len(plot_spans) - 1)] if plot_spans else {"title": "", "raw_text": raw_text}
+                plot_name = _coerce_text(plot_payload.get("plot_name"), plot_span.get("title", "") or f"Plot {plot_index}")
                 scene_record["plots"].append(
                     {
                         "plot_id": f"scene_{scene_index}_plot_{plot_index}",
                         "plot_index": plot_index,
                         "plot_name": plot_name,
                         "plot_goal": _coerce_text(plot_payload.get("plot_goal"), plot_name),
-                        "raw_text": raw_text,
+                        "raw_text": str(plot_span.get("raw_text", raw_text)),
                         "status": "pending",
                         "progress": 0.0,
                     }
@@ -412,7 +415,7 @@ def _build_scene_sections(
     headings = _collect_headings(document.raw_units)
     if not headings:
         raw_text = document.text.strip()
-        return [{"title": "Scene 1", "raw_text": raw_text}] if raw_text else []
+        return [{"title": "Scene 1", "raw_text": raw_text, "plot_spans": [{"title": "Plot 1", "raw_text": raw_text}]}] if raw_text else []
 
     allowed_levels = _resolve_scene_heading_levels(
         headings,
@@ -442,7 +445,7 @@ def _build_scene_sections(
 
     if not scene_starts:
         raw_text = document.text.strip()
-        return [{"title": "Scene 1", "raw_text": raw_text}] if raw_text else []
+        return [{"title": "Scene 1", "raw_text": raw_text, "plot_spans": [{"title": "Plot 1", "raw_text": raw_text}]}] if raw_text else []
 
     sections: list[dict[str, Any]] = []
     for index, scene_start in enumerate(scene_starts):
@@ -451,7 +454,15 @@ def _build_scene_sections(
         raw_text = _slice_lines(document.raw_units, section_start, section_end).strip()
         if not raw_text:
             continue
-        sections.append({"title": scene_start["title"], "raw_text": raw_text})
+        plot_spans = _build_plot_spans(
+            document.raw_units,
+            headings,
+            section_start,
+            section_end,
+            scene_start["title"],
+            scene_start["level"],
+        )
+        sections.append({"title": scene_start["title"], "raw_text": raw_text, "plot_spans": plot_spans})
     return sections
 
 
@@ -477,11 +488,9 @@ def _resolve_scene_heading_levels(
     candidate_levels = sorted({heading["level"] for heading in candidate_headings})
     level_counts = Counter(heading["level"] for heading in candidate_headings)
 
-    # Skip a lone document title such as "# Scenario Name" when deeper sections exist.
     if len(candidate_levels) > 1 and level_counts.get(candidate_levels[0], 0) == 1:
         candidate_levels = candidate_levels[1:] or candidate_levels
 
-    # When the document uses many nested heading depths, treat the deepest level as detail text rather than scene splits.
     if len(candidate_levels) > 2:
         candidate_levels = candidate_levels[:-1]
 
@@ -536,68 +545,56 @@ def _build_plot_spans(
     section_start: int,
     section_end: int,
     scene_title: str,
+    scene_level: int,
 ) -> list[dict[str, str]]:
-    level5_headings = [heading for heading in headings if heading["level"] == 5 and section_start < heading["line_no"] <= section_end]
-    block_starts = [section_start] + [heading["line_no"] for heading in level5_headings]
-    blocks: list[dict[str, str | int]] = []
-    for block_index, block_start in enumerate(block_starts):
-        block_end = block_starts[block_index + 1] - 1 if block_index + 1 < len(block_starts) else section_end
-        if block_index == 0:
-            blocks.append({"title": scene_title, "kind": "prefix", "raw_text": _slice_lines(raw_units, block_start, block_end)})
-        else:
-            blocks.append(
-                {
-                    "title": level5_headings[block_index - 1]["title"],
-                    "kind": "heading5",
-                    "raw_text": _slice_lines(raw_units, block_start, block_end),
-                }
-            )
-
-    substantive_heading5 = any(block["kind"] == "heading5" and not _is_auxiliary_plot_title(str(block["title"])) for block in blocks)
-    decisions: list[dict[str, str]] = []
-    for block_index, block in enumerate(blocks):
-        if block["kind"] == "prefix":
-            body_lines = [line.strip() for line in str(block["raw_text"]).splitlines()[1:] if line.strip()]
-            decisions.append({"role": "plot" if substantive_heading5 and bool(body_lines) else "auxiliary", "attach_to": "" if substantive_heading5 and bool(body_lines) else "next"})
-            continue
-        if _is_auxiliary_plot_title(str(block["title"])):
-            decisions.append({"role": "auxiliary", "attach_to": "previous" if block_index > 0 else "next"})
-            continue
-        decisions.append({"role": "plot", "attach_to": ""})
-
-    if not any(decision["role"] == "plot" for decision in decisions):
+    plot_level = _resolve_plot_heading_level(headings, section_start, section_end, scene_level)
+    if plot_level is None:
         raw_text = _slice_lines(raw_units, section_start, section_end)
         return [{"title": scene_title, "raw_text": raw_text}]
 
-    groups: list[list[int]] = []
-    pending_for_next: list[int] = []
-    for block_index, decision in enumerate(decisions):
-        if decision["role"] == "plot":
-            groups.append(pending_for_next + [block_index])
-            pending_for_next = []
-            continue
-        if decision["attach_to"] == "previous" and groups:
-            groups[-1].append(block_index)
-        else:
-            pending_for_next.append(block_index)
-    if pending_for_next and groups:
-        groups[-1].extend(pending_for_next)
-
+    plot_headings = [
+        heading
+        for heading in headings
+        if heading["level"] == plot_level and section_start < heading["line_no"] <= section_end
+    ]
     plot_spans: list[dict[str, str]] = []
-    for group in groups:
-        group_blocks = [blocks[index] for index in group]
-        titles = [
-            str(block["title"])
-            for block in group_blocks
-            if block["kind"] == "heading5" and not _is_auxiliary_plot_title(str(block["title"]))
-        ]
+    prefix_end = plot_headings[0]["line_no"] - 1 if plot_headings else section_end
+    prefix_raw_text = _slice_lines(raw_units, section_start, prefix_end).strip()
+
+    for index, heading in enumerate(plot_headings):
+        block_start = heading["line_no"]
+        block_end = plot_headings[index + 1]["line_no"] - 1 if index + 1 < len(plot_headings) else section_end
+        block_text = _slice_lines(raw_units, block_start, block_end).strip()
+        if not block_text:
+            continue
+        if index == 0 and prefix_raw_text:
+            block_text = "\n".join(part for part in (prefix_raw_text, block_text) if part)
         plot_spans.append(
             {
-                "title": titles[0] if titles else str(group_blocks[0]["title"]),
-                "raw_text": "\n".join(str(block["raw_text"]).strip() for block in group_blocks if str(block["raw_text"]).strip()),
+                "title": str(heading["title"]),
+                "raw_text": block_text,
             }
         )
+
+    if not plot_spans and prefix_raw_text:
+        return [{"title": scene_title, "raw_text": prefix_raw_text}]
     return plot_spans or [{"title": scene_title, "raw_text": _slice_lines(raw_units, section_start, section_end)}]
+
+
+def _resolve_plot_heading_level(
+    headings: list[dict[str, Any]],
+    section_start: int,
+    section_end: int,
+    scene_level: int,
+) -> int | None:
+    candidate_levels = sorted(
+        {
+            int(heading["level"])
+            for heading in headings
+            if section_start < heading["line_no"] <= section_end and int(heading["level"]) > scene_level
+        }
+    )
+    return candidate_levels[0] if candidate_levels else None
 
 
 def _build_script_summary(
@@ -612,7 +609,7 @@ def _build_script_summary(
     for batch in _split_script_summary_batches(structured_scenes):
         prompt = SCRIPT_SUMMARY_PROMPT_TEMPLATE.format(
             script_summary=script_summary,
-            structured_scene_plot_json=json.dumps(batch, ensure_ascii=False),
+            structured_scene_plot_json=json5.dumps(batch, ensure_ascii=False),
         )
         updated_summary = str(llm(prompt) or "").strip()
         if updated_summary:
@@ -650,7 +647,7 @@ def _split_script_summary_batches(
 
     for scene in structured_scenes:
         candidate_batch = current_batch + [scene]
-        candidate_text = json.dumps(candidate_batch, ensure_ascii=False)
+        candidate_text = json5.dumps(candidate_batch, ensure_ascii=False)
         if current_batch and len(candidate_text) > max_chars:
             batches.append(current_batch)
             current_batch = [scene]

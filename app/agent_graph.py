@@ -312,7 +312,7 @@ A scene is considered sufficiently explored when:
 
 - Most meaningful information in the Current Plot Raw Text has already been extracted  
   OR  
-- The player has attempted relevant actions but no further useful information can be obtained
+- The player has attempted most obvious actions
 
 This judgment of sufficiently explored is based on the Current Plot Raw Text, NOT on newly generated narrative content.
 
@@ -373,12 +373,31 @@ When selecting the next scene:
 Inputs:
 
 Recent Conversation (last 3 rounds, from previous to latest):
+This is the MOST IMPORTANT signal of the player's intent.
+
+- If the player clearly expresses a desire to move to another location or start a different activity → you MUST switch.
+- Player intent ALWAYS takes priority over all other rules.
+- Player location persists across turns:
+  - If the player previously moved to a new location, you must assume they are still there unless explicitly stated otherwise.
+  - If the player’s current location does NOT match the current scene → you MUST switch.
+- Even if the system failed to switch previously, you MUST correct it now.
+
 {global_recent_conversation}
 
 Long-Term Memory:
+Provides background context and previously discovered information.
+Use it to maintain consistency, but DO NOT use it to override the player’s current intent.
+
 {long_term_memory}
 
 Current Plot Raw Text:
+This is the MOST IMPORTANT reference for determining whether the current plot is complete.
+
+- If the player has already explored the main actionable content in this plot → you should switch.
+- If no new meaningful information or actions remain → you should switch.
+- This judgment must be based ONLY on the raw plot content, NOT on newly generated narrative. 
+  - If the narrative suggests continuing exploration, BUT the raw text contains no new actionable information → the plot is already fully explored → you should switch.
+
 {current_plot_raw_text}
 
 ---
