@@ -11,6 +11,16 @@ from app.database import Database
 from app.parser import detect_source_type, parse_script_bundle, read_uploaded_document
 from app.vector_store import ChromaStore
 
+import logging
+import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
+)
+
 
 COC_CORE_KEYS = ['STR', 'CON', 'SIZ', 'DEX', 'APP', 'INT', 'POW', 'EDU']
 COC_3D6_KEYS = ['STR', 'CON', 'DEX', 'APP', 'POW']

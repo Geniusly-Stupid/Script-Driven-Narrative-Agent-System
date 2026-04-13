@@ -738,6 +738,22 @@ class NarrativeAgent:
                     return scene, plot
         return None, None
 
+    def _resolve_target_plot_id(self, target_plot_id: str) -> str:
+        target_plot_id = str(target_plot_id or '').strip()
+        if not target_plot_id:
+            return ''
+        target_scene, target_plot = self._find_scene_and_plot(target_plot_id)
+        if target_scene and target_plot:
+            return target_plot_id
+        for scene in self.db.list_scenes():
+            if str(scene.get('scene_id', '')) != target_plot_id:
+                continue
+            plots = scene.get('plots', [])
+            if not plots:
+                return ''
+            return str(plots[0].get('plot_id', '') or '')
+        return target_plot_id
+
     def _load_visited_state(self, state: NarrativeState) -> None:
         nav = self.db.get_system_state().get('navigation_state', {}) or {}
         visited_scenes = nav.get('visited_scenes', [])
@@ -847,11 +863,14 @@ class NarrativeAgent:
         prompt = self._branch_prompt(state)
         self._record_prompt(state, 'branch_transition_prompt', prompt)
         try:
-            decision = self._parse_branch_decision(self._llm_call(prompt, step_name='branch_transition_decision'))
+            raw = self._llm_call(prompt, step_name='branch_transition_decision')
+            decision = self._parse_branch_decision(raw)
+            logger.info(f"PARSED: {decision}")
         except Exception as exc:
             logger.error("Branch transition decision failed error=%s", exc)
             decision = {}
-        target_plot_id = str(decision.get('target_plot_id', '') or '').strip()
+        target_plot_id = self._resolve_target_plot_id(decision.get('target_plot_id', ''))
+        logger.info(f"Resolved target_plot: {target_plot_id}")
         switch_value = decision.get('switch', False)
         requested_switch = switch_value.strip().lower() == 'true' if isinstance(switch_value, str) else bool(switch_value)
         should_switch = requested_switch and target_plot_id and target_plot_id != state.get('plot_id', '')

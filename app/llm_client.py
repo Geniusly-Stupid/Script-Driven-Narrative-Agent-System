@@ -311,7 +311,11 @@ def _call_openai_llm(
 
     max_retries = int(os.getenv("OPENAI_MAX_RETRIES", str(max_retries)))
     max_tokens = _step_max_tokens(step_name, int(os.getenv("OPENAI_MAX_TOKENS", "2048")))
-    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.6"))
+    temperature = (
+        0.1
+        if str(step_name or "").strip().lower() == "branch_transition_decision"
+        else float(os.getenv("OPENAI_TEMPERATURE", "0.6"))
+    )
     top_p = float(os.getenv("OPENAI_TOP_P", "0.95"))
 
     headers = {
@@ -439,7 +443,11 @@ def _call_nvidia_llm(
 
     max_retries = int(os.getenv("NVIDIA_MAX_RETRIES", str(max_retries)))
     max_tokens = _step_max_tokens(step_name, int(os.getenv("NVIDIA_MAX_TOKENS", "4096")))
-    temperature = float(os.getenv("NVIDIA_TEMPERATURE", "0.6"))
+    temperature = (
+        0.1
+        if str(step_name or "").strip().lower() == "branch_transition_decision"
+        else float(os.getenv("NVIDIA_TEMPERATURE", "0.6"))
+    )
     top_p = float(os.getenv("NVIDIA_TOP_P", "0.95"))
     top_k = int(os.getenv("NVIDIA_TOP_K", "20"))
     presence_penalty = float(os.getenv("NVIDIA_PRESENCE_PENALTY", "0"))
