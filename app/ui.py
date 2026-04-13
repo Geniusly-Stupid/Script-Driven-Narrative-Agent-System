@@ -611,6 +611,16 @@ def _render_settings(debug_mode: bool, current_language: str, stage: str, player
             if background:
                 st.write(f'Background: {background}')
 
+            characteristics = player_profile.get('characteristics', {}) or {}
+            core_lines = [
+                f'{key}:{characteristics.get(key)}'
+                for key in COC_CORE_KEYS
+                if characteristics.get(key) is not None
+            ]
+            if core_lines:
+                st.markdown('**Core Attributes**')
+                st.code('\n'.join(core_lines), language='text')
+
             chosen_allocations = player_profile.get('chosen_skill_allocations', {}) or {}
             occupation = chosen_allocations.get('occupation', []) if isinstance(chosen_allocations, dict) else []
             personal_interest = chosen_allocations.get('personal_interest', []) if isinstance(chosen_allocations, dict) else []

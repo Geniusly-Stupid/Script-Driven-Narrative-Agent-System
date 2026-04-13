@@ -202,6 +202,15 @@ Unvisited Scene Name:
 
 Visited Scene Name:
 {visited_scene_name}
+
+---
+# OTHER PLOT INFORMATION
+
+These represent the possible plot directions or next progressions within the current scene. Provide subtle hints when it helps guide progression.
+
+Unvisited Plot Name:
+{unvisited_plot_name}
+
 """
 
 ROLL_CHECK_PROMPT_TEMPLATE = """# SYSTEM PROMPT
@@ -989,6 +998,9 @@ class NarrativeAgent:
             recent_conversation = self._format_recent_conversation(state.get('global_conversation_history', []), rounds=3)
             scenes = self.db.list_scenes()
             visited_scene_ids = set(state.get('visited_scenes', []))
+            visited_plot_ids = set(state.get('visited_plots', []))
+            current_scene = self.db.get_scene(state.get('scene_id', '')) or {}
+            current_scene_plots = current_scene.get('plots', []) if current_scene else []
             current_scene_index = next(
                 (idx for idx, scene in enumerate(scenes) if str(scene.get('scene_id', '')) == state.get('scene_id', '')),
                 -1,
@@ -1015,6 +1027,15 @@ class NarrativeAgent:
                 ),
                 visited_scene_name=self._format_scene_names(
                     [scene for scene in scenes if str(scene.get('scene_id', '')) in visited_scene_ids]
+                ),
+                unvisited_plot_name=self._format_scene_names(
+                    [
+                        {
+                            'scene_name': plot.get('plot_name', '') or plot.get('plot_id', ''),
+                        }
+                        for plot in current_scene_plots
+                        if str(plot.get('plot_id', '')) not in visited_plot_ids
+                    ]
                 ),
                 current_plot_goal=state.get('plot_goal', '') or 'None',
                 current_plot_raw_text=state.get('current_plot_raw_text', '') or 'None',
