@@ -27,24 +27,19 @@ def main() -> int:
 
         docs = [
             {'content': 'Witness saw cloaked figure near market.', 'metadata': {'type': 'npc'}},
-            {'content': 'Harbor has hidden warehouse.', 'metadata': {'type': 'location'}},
-            {'content': 'Stealth checks use d100.', 'metadata': {'type': 'rule'}},
-            {'content': 'Map shows tunnel route.', 'metadata': {'type': 'event'}},
+            {'content': 'The harbor district is controlled by a shipping guild.', 'metadata': {'type': 'setting'}},
+            {'content': 'Map shows tunnel route beneath the market.', 'metadata': {'type': 'clue'}},
             {
                 'content': 'Town council controls public records and suppresses rumors.',
-                'metadata': {'type': 'world_context', 'knowledge_type': 'background'},
-            },
-            {
-                'content': 'Victim was silenced after uncovering the faction pact.',
-                'metadata': {'type': 'world_context', 'knowledge_type': 'truth'},
+                'metadata': {'type': 'other'},
             },
         ]
         print('[test_rag] input: docs ->', docs)
         categorized = categorize_docs(docs)
         print('[test_rag] output: categorized ->', categorized)
 
-        assert categorized['world_context_info'] != 'None', 'world_context bucket should not be empty'
-        assert categorized['truth_related_info'] != 'None', 'truth bucket should not be empty'
+        assert categorized['setting'] != 'None', 'setting bucket should not be empty'
+        assert categorized['clue'] != 'None', 'clue bucket should not be empty'
 
         print('[test_rag] result: PASS')
         return 0

@@ -29,8 +29,6 @@ def load_game_rules_knowledge() -> list[dict[str, Any]]:
                 'knowledge_type': 'rule',
                 'title': title,
                 'content': content,
-                'source_page_start': 1,
-                'source_page_end': 1,
                 'metadata': {
                     'source': 'database/GameRules.md',
                     'section_heading': title,

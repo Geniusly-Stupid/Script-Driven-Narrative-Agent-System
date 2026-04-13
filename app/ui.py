@@ -6,11 +6,20 @@ import re
 
 import streamlit as st
 
-from app.agent_graph import NarrativeAgent
+from app.agent_graph import KP_OPENING_MARKER, NarrativeAgent
 from app.database import Database
 from app.parser import detect_source_type, parse_script_bundle, read_uploaded_document
-from app.rules_loader import load_game_rules_knowledge
 from app.vector_store import ChromaStore
+
+import logging
+import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
+)
 
 
 COC_CORE_KEYS = ['STR', 'CON', 'SIZ', 'DEX', 'APP', 'INT', 'POW', 'EDU']
@@ -602,6 +611,16 @@ def _render_settings(debug_mode: bool, current_language: str, stage: str, player
             if background:
                 st.write(f'Background: {background}')
 
+            characteristics = player_profile.get('characteristics', {}) or {}
+            core_lines = [
+                f'{key}:{characteristics.get(key)}'
+                for key in COC_CORE_KEYS
+                if characteristics.get(key) is not None
+            ]
+            if core_lines:
+                st.markdown('**Core Attributes**')
+                st.code('\n'.join(core_lines), language='text')
+
             chosen_allocations = player_profile.get('chosen_skill_allocations', {}) or {}
             occupation = chosen_allocations.get('occupation', []) if isinstance(chosen_allocations, dict) else []
             personal_interest = chosen_allocations.get('personal_interest', []) if isinstance(chosen_allocations, dict) else []
@@ -624,7 +643,7 @@ def _render_loading_state(target: object, text: str, centered: bool = False) -> 
             f"""
             <div class="gm-parse-overlay">
                 <div class="gm-loading-shell">
-                    <div class="gm-loading-icon">鉁?/div>
+                    <div class="gm-loading-icon">🌟</div>
                     <div class="gm-loading-text">{text}</div>
                     <div class="gm-loading-dots" aria-hidden="true">
                         <span></span><span></span><span></span>
@@ -763,6 +782,8 @@ def _load_messages_from_db(db: Database) -> list[dict[str, object]]:
     messages: list[dict[str, object]] = []
     for row in rows:
         user = row['user'] or ''
+        if user == KP_OPENING_MARKER:
+            user = ''
         agent = row['agent'] or ''
         messages.append(
             {
@@ -819,6 +840,16 @@ def _render_story_notice() -> None:
         st.error(text)
     else:
         st.info(text)
+
+
+def _first_playable_position(scenes: list[dict[str, object]]) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+    for scene in scenes:
+        plots = scene.get('plots', [])
+        if isinstance(plots, list) and plots:
+            first_plot = plots[0]
+            if isinstance(first_plot, dict):
+                return scene, first_plot
+    return None, None
 
 
 def _reset_to_upload_stage(db: Database, vector: ChromaStore) -> None:
@@ -897,16 +928,6 @@ def run_app() -> None:
         agent = st.session_state.agent
 
     state = db.get_system_state()
-    if state.get('stage') != 'upload':
-        existing_rule_items = [
-            item for item in db.get_knowledge_by_type('rule') if item.get('metadata', {}).get('source') == 'database/GameRules.md'
-        ]
-        if not existing_rule_items:
-            game_rules_knowledge = load_game_rules_knowledge()
-            if game_rules_knowledge:
-                db.insert_knowledge(game_rules_knowledge)
-                vector.add_from_scenes([], knowledge=game_rules_knowledge)
-                state = db.get_system_state()
     language_options = ['English', 'Chinese']
     current_language = state.get('output_language', 'English')
     if current_language not in language_options:
@@ -948,39 +969,22 @@ def run_app() -> None:
     if stage == 'upload':
         upload_panel = st.container()
         uploaded = None
-        source_type = 'pdf'
-        source_unit_label = 'page'
         with upload_panel:
             _render_section_header('Upload Script', 'Step 1')
             upload_nonce = int(st.session_state.get('script_upload_nonce', 0))
             uploaded = st.file_uploader(
-                'Upload script (.pdf, .md, .markdown)',
-                type=['pdf', 'md', 'markdown'],
+                'Upload script (.md, .markdown)',
+                type=['md', 'markdown'],
                 key=f'script_upload_input_{upload_nonce}',
             )
             unsupported_type = False
             if uploaded:
                 try:
                     source_type = detect_source_type(uploaded.name, getattr(uploaded, 'type', None))
+                    st.caption(f"Detected source type: {source_type}.")
                 except ValueError:
                     unsupported_type = True
-                    st.error('Unsupported file type. Please upload a PDF or Markdown file.')
-                source_unit_label = 'line' if source_type == 'markdown' else 'page'
-                st.caption(f"Detected source type: {source_type}. Range controls below use {source_unit_label}s.")
-            unit_title = source_unit_label.title()
-            start_page = st.number_input(f'Start {unit_title}', min_value=1, value=1)
-            end_page = st.number_input(f'End {unit_title} (0 means auto)', min_value=0, value=0)
-            story_start_page = st.number_input(
-                f'Story Start {unit_title} ({source_unit_label} number, 0 means auto)',
-                min_value=0,
-                value=0,
-            )
-            story_end_page = st.number_input(
-                f'Story End {unit_title} ({source_unit_label} number, 0 means auto)',
-                min_value=0,
-                value=0,
-            )
-            st.caption(f'Set the story {source_unit_label} range only if you want to override auto detection.')
+                    st.error('Unsupported file type. Please upload a Markdown file.')
             parse_clicked = bool(uploaded and st.button('Parse Script'))
 
         if parse_clicked:
@@ -988,89 +992,47 @@ def run_app() -> None:
             parse_loading = st.empty()
             try:
                 _render_loading_state(parse_loading, 'Parsing the script...', centered=True)
-                if (story_start_page > 0) != (story_end_page > 0):
-                    parse_loading.empty()
-                    st.error(
-                        f'Please fill both Story Start {unit_title} and Story End {unit_title}, or leave both as 0 for auto detection.'
-                    )
-                    st.stop()
-
                 if unsupported_type:
                     parse_loading.empty()
-                    st.error('Unsupported file type. Please upload a PDF or Markdown file.')
+                    st.error('Unsupported file type. Please upload a Markdown file.')
                     st.stop()
 
-                start_unit = int(start_page)
-                end_unit = int(end_page) if end_page > 0 else None
                 document = read_uploaded_document(
                     uploaded.name,
                     uploaded.getvalue(),
-                    start_unit=start_unit,
-                    end_unit=end_unit,
                     mime_type=getattr(uploaded, 'type', None),
                 )
-                if not document.segments:
+                if not document.text.strip():
                     parse_loading.empty()
-                    st.error(f'No readable {source_unit_label}s found in the uploaded file.')
+                    st.error('No readable Markdown content found in the uploaded file.')
                     st.stop()
-
-                manual_story_start = None
-                manual_story_end = None
-                if story_start_page > 0 and story_end_page > 0:
-                    manual_story_start = int(story_start_page)
-                    manual_story_end = int(story_end_page)
-                    if (
-                        manual_story_start < document.display_start
-                        or manual_story_end > document.display_end
-                        or manual_story_start > document.display_end
-                        or manual_story_end < document.display_start
-                    ):
-                        parse_loading.empty()
-                        st.error(
-                            f'Story {source_unit_label} range must stay within the selected {source_unit_label} range '
-                            f'({document.display_start}-{document.display_end}).'
-                        )
-                        st.stop()
 
                 _render_loading_state(parse_loading, 'Organizing scenes...', centered=True)
-                bundle = parse_script_bundle(
-                    source_document=document,
-                    story_start_page=manual_story_start,
-                    story_end_page=manual_story_end,
-                )
+                bundle = parse_script_bundle(source_document=document)
                 scenes = bundle.get('scenes', [])
                 knowledge = bundle.get('knowledge', [])
-                game_rules_knowledge = load_game_rules_knowledge()
-                all_knowledge = knowledge + game_rules_knowledge
-                structure = bundle.get('structure', {})
-                parse_warnings = bundle.get('warnings', [])
+                script_summary = str(bundle.get('script_summary', '') or '')
                 source_metadata = bundle.get('source_metadata', {})
-
-                if not scenes:
-                    parse_loading.empty()
-                    st.error(f'No scenes extracted. Please check the {source_type} content or LLM output.')
-                    st.stop()
 
                 _render_loading_state(parse_loading, 'Preparing the world...', centered=True)
                 db.reset_story_data()
                 vector.reset()
                 db.insert_scenes(scenes)
-                db.insert_knowledge(all_knowledge)
-                vector.add_from_scenes(scenes, knowledge=all_knowledge)
-
-                db.save_summary('parse_structure', json.dumps(structure, ensure_ascii=False))
-                db.save_summary('parse_warnings', json.dumps(parse_warnings, ensure_ascii=False))
-                db.save_summary('parse_mode', bundle.get('parse_mode', 'balanced'))
+                db.insert_knowledge(knowledge)
+                vector.add_from_scenes(scenes, knowledge=knowledge)
+                db.save_summary('script', script_summary)
                 db.save_summary('parse_source_meta', json.dumps(source_metadata, ensure_ascii=False))
 
-                first_scene = scenes[0]
-                first_plot = first_scene['plots'][0]
-                db.update_scene(first_scene['scene_id'], {'status': 'in_progress'})
+                first_scene, first_plot = _first_playable_position(scenes)
+                current_scene_id = str(first_scene.get('scene_id', '')) if first_scene else ''
+                current_plot_id = str(first_plot.get('plot_id', '')) if first_plot else ''
+                if current_scene_id:
+                    db.update_scene(current_scene_id, {'status': 'in_progress'})
                 db.update_system_state(
                     {
                         'stage': 'parse',
-                        'current_scene_id': first_scene['scene_id'],
-                        'current_plot_id': first_plot['plot_id'],
+                        'current_scene_id': current_scene_id,
+                        'current_plot_id': current_plot_id,
                         'plot_progress': 0.0,
                         'scene_progress': 0.0,
                         'current_scene_intro': '',
@@ -1080,9 +1042,18 @@ def run_app() -> None:
                 _clear_story_runtime_session_state()
 
                 parse_loading.empty()
-                st.success(
-                    f"Script parsed and stored. scenes={len(scenes)}, knowledge={len(all_knowledge)}, warnings={len(parse_warnings)}"
-                )
+                if scenes and current_scene_id and current_plot_id:
+                    st.success(
+                        f"Script parsed and stored. scenes={len(scenes)}, knowledge={len(knowledge)}"
+                    )
+                elif scenes:
+                    st.warning(
+                        f"Script parsed, but no playable plot was extracted. scenes={len(scenes)}, knowledge={len(knowledge)}"
+                    )
+                else:
+                    st.warning(
+                        f"Script parsed, but no playable scene was extracted. knowledge={len(knowledge)}"
+                    )
                 st.rerun()
             except Exception as exc:  # noqa: BLE001
                 parse_loading.empty()
@@ -1090,57 +1061,32 @@ def run_app() -> None:
                 st.stop()
 
     elif stage == 'parse':
-        _render_section_header('Review Structure', 'Step 2')
+        _render_section_header('Review Parse', 'Step 2')
 
         scenes = db.list_scenes()
         plot_count = sum(len(scene.get('plots', [])) for scene in scenes)
         est_minutes = plot_count * 10
         source_meta_raw = db.get_summary('parse_source_meta')
+        script_summary = db.get_summary('script')
         try:
             source_meta = json.loads(source_meta_raw) if source_meta_raw else {}
         except Exception:
             source_meta = {}
-        source_unit_label = str(source_meta.get('source_unit_label', 'page') or 'page')
-        source_unit_title = source_unit_label.title()
 
         if debug_mode:
-            structure_raw = db.get_summary('parse_structure')
-            if structure_raw:
-                try:
-                    structure = json.loads(structure_raw)
-                except Exception:
-                    structure = {'raw': structure_raw}
-                st.markdown('#### Parsed Document Structure')
-                st.write(structure)
-
-            parse_mode = db.get_summary('parse_mode')
-            if parse_mode:
-                st.caption(f'Parse mode: {parse_mode}')
-
             if source_meta:
                 st.markdown('#### Source Metadata')
                 st.write(source_meta)
-
-            warnings_raw = db.get_summary('parse_warnings')
-            if warnings_raw:
-                try:
-                    parse_warnings = json.loads(warnings_raw)
-                except Exception:
-                    parse_warnings = [warnings_raw]
-                if parse_warnings:
-                    st.warning(f'Parser warnings: {len(parse_warnings)}')
-                    for w in parse_warnings[:8]:
-                        st.write(f'- {w}')
+            if script_summary:
+                st.markdown('#### Script Summary')
+                st.write(script_summary)
 
             for scene in scenes:
                 st.write(
                     {
                         'scene_id': scene['scene_id'],
+                        'scene_name': scene.get('scene_name', ''),
                         'scene_goal': scene['scene_goal'],
-                        f'source_{source_unit_label}s': (
-                            f"{source_unit_title} "
-                            f"{scene.get('source_page_start', '?')}-{scene.get('source_page_end', '?')}"
-                        ),
                         'scene_description': (scene.get('scene_description', '') or '')[:120],
                         'plots': len(scene.get('plots', [])),
                     }
@@ -1164,7 +1110,7 @@ def run_app() -> None:
                 st.metric('Est. Minutes', est_minutes)
             st.caption(f'estimated play time {est_minutes} minutes')
 
-        if st.button('Confirm Structure'):
+        if st.button('Continue'):
             db.update_system_state({'stage': 'character'})
             st.rerun()
 
@@ -1235,7 +1181,7 @@ def run_app() -> None:
 
         _render_section_header('Step 4: Skills', 'Step 4')
         occ_default = '\n'.join(_ensure_default_skill_lines(list(selected_build['occupation_suggested'])))
-        interest_default = '\n'.join(_ensure_default_skill_lines(list(selected_build['interest_suggested'])))
+        interest_default = '\n'.join(list(selected_build['interest_suggested']))
         if not st.session_state.occupation_alloc_text:
             st.session_state.occupation_alloc_text = occ_default
         if not st.session_state.interest_alloc_text:

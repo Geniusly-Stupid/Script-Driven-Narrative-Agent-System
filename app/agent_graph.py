@@ -1,47 +1,35 @@
 ﻿from __future__ import annotations
 
 import json
+import json5
 import random
 import re
 from typing import Any, TypedDict
 import traceback
 import logging
 
-try:
-    import json5  # type: ignore[import-not-found]
-except ImportError:
-    json5 = None
-
 from langgraph.graph import END, StateGraph
 
 from app.database import Database
 from app.llm_client import call_llm
 from app.rag import categorize_docs, generate_retrieval_queries
-from app.state import (
-    classify_player_alignment,
-    extract_turn_state,
-    evaluate_plot_completion,
-    evaluate_pre_response_transition,
-    evaluate_scene_completion,
-    next_story_position,
-    set_latest_transition_context,
-    story_position_context,
-    update_plot_guidance_state,
-)
 from app.vector_store import ChromaStore
 
 logger = logging.getLogger(__name__)
+
+
+def truncate_plot_raw_text(text: str) -> str:
+    return text if len(text) <= 3000 else text[:3000]
 
 RESPONSE_PROMPT_TEMPLATE = """# SYSTEM PROMPT
 
 You are {agent_role}, running an interactive {game_system} narrative experience.
 
 ## Core Responsibilities
-- Maintain long-term narrative coherence.
+- Respond to the player by describing NPC reactions and changes in the scene, strictly based on the Current Plot Raw Text.
 - Progress toward current Plot goals and ultimately the Scene goal.
+- Maintain long-term narrative coherence.
 - Respect world logic and past events.
-- Do not reveal future plot content prematurely.
-- Balance player freedom with script structure.
 
 ## Style
 - Tone: {tone_style}
@@ -52,16 +40,18 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
 - Use only information provided in Context.
 - Do not fabricate missing knowledge.
 - Avoid meta commentary.
-- Hidden truth is keeper-only context. Use it for consistency, do not reveal it directly unless current plot already unlocks it.
-- Skipped or unvisited branches did not happen. Do not summarize, reward, or conclude them as if they occurred.
+- Treat Current Plot Raw Text as authoritative script context.
 - Final response language: {output_language}
 - Write the response entirely in {output_language}.
 
 ## Player Interaction Rules
 
-- The scene opening already counts as the beginning of the current plot. Do NOT treat it as a pre-plot phase.
 - The player controls the PC. Do NOT speak for the PC, extend their dialogue, or describe their internal thoughts.
-- After the player acts or speaks, always advance the scene with NPC dialogue, NPC action, or environmental consequences.
+- After the player acts or speaks, advance the scene with NPC dialogue, NPC action, or environmental consequences.
+- If all meaningful content in the Current Plot Raw Text has been explored, gently suggest moving to the next scene or plot in parentheses ():
+  - For example: 
+    - "There are no further clues in this location. You may consider investigating other areas."
+    - "Your meeting with John has come to an end. If you have nothing else to do, you may rest and begin a new day."
 - When a dice roll or player choice is required **by the script or situation**, present it clearly and naturally in parentheses (), without breaking immersion.
     - For skill checks, briefly describe the situation and then indicate the required check, for example:
       "As you walk past, an elderly lady studies your appearance with clear judgment in her eyes, as if she values status and presentation. (Make an APP or Credit Rating check.)"
@@ -71,65 +61,50 @@ You are {agent_role}, running an interactive {game_system} narrative experience.
       2. Search the graveyard.
          You pause, considering your next move. (Choose one option.)"
     - Maintain an immersive, in-world (diegetic) tone. Present checks and choices as a natural part of the scene, not as system instructions.
-    - Do NOT present choices or branches every turn. Overusing explicit choices can break immersion and reduce the player’s sense of freedom. Only include them when they are required by script or really necessary for progression.
+  **Do NOT present choices or branches every turn**. Overusing explicit choices can break immersion and reduce the player’s sense of freedom. Only include them when they are required by script or or really necessary for progression.
 - If the player's action significantly deviates from the main storyline, guide them back naturally through NPC dialogue, NPC actions, or environmental consequences.
-- The first priority of this turn is to complete or meaningfully advance the Active Plot Objective. Do NOT spin up a new subplot from irrelevant player behavior.
-- If the current node is a hub, treat it as a live choice point. Present only the Remaining Eligible Targets as actionable leads, not exhausted leads.
-- If the player tries to revisit an exhausted scene or plot, explain in-world that it is unlikely to reveal anything new, then redirect smoothly toward the remaining eligible leads or an available exit.
-- If a branch investigation has stalled and the player clearly gives up, accepts there is nothing more to learn, or decides to leave, treat that as a valid way to wrap the current investigation beat and guide the story back toward the hub or the next eligible lead.
-- If the player drifts away from the active storyline, absorb the action briefly in-world and then steer attention back toward the current plot goal, remaining eligible targets, or an available exit.
-- If Latest Player Alignment is `off_topic`, acknowledge the action briefly, then pivot back to the Active Plot Objective and Current Scene Boundary. Do not build a new durable subplot around the irrelevant action.
-- If Redirect State shows repeated drift, keep the acknowledgement minimal and pivot back more firmly.
-- If Latest Player Alignment is `target_choice`, transition smoothly into that legal target in-world and make the bridge feel causally connected to the player's action.
-- If the player clearly commits to the next plot or next scene, transition into that material immediately in this same response instead of re-opening the current setup plot.
-- When such a handoff happens, write the first playable beats of the target plot naturally. Do not repeat a second opening for the current plot.
-- Do NOT narrate the player as already arriving in another scene or plot unless a legal state transition has already been applied for this turn.
-- If the current beat is only being wrapped up and the next location has not been legally entered yet, close the current beat and angle toward the next lead without fully staging the new location.
-- If Latest Turn State shows an open choice and the player answered one of the offered targets, execute that choice instead of rephrasing the same choice point again.
-- If `Scene Entry Turn` is true and `Player Input` is empty, do NOT invent a fresh explicit menu of options unless `Opening Choice Allowed` is true.
-- If `Opening Choice Allowed` is false, do not end the opening with a parenthetical branch question or a newly invented binary choice.
-- Focus on describing NPC reactions and changes in the scene.
-- Reveal information **gradually**. Do NOT provide too much information at once; encourage player exploration and role-play.
 - Do NOT ask rhetorical or leading questions about the PC’s beliefs, thoughts, or motivations.
 - Do NOT ask questions to the player or suggest what they should do next.
 
 ## Game Mechanics
 
-* If a dice result is provided, the narrative must strictly reflect the skill check outcome:
+- If a dice result is provided, the narrative should reflect the skill check outcome, within the limits of the Current Plot Raw Text.
 
-  * **Extreme Success**: Reveal critical details, hidden elements, or additional high-value insights beyond normal expectations.
-  * **Hard Success**: Reveal important details clearly and efficiently, possibly with minor additional insight.
-  * **Regular Success**: Reveal expected information necessary to progress.
-  * **Fail**: Withhold key information or provide limited, vague, or inconclusive results.
-  * **Fumble (Worst Fail)**: Introduce significant negative consequences, risks, or complications.
+- Interpretation rules:
+  - **Extreme Success**:
+    - Provide the most precise and complete understanding of existing details
+    - Highlight subtle, easily missed elements already present in the Current Plot Raw Text
+    - Do NOT introduce new objects, structures, or hidden elements not grounded in the text
+  - **Hard Success**:
+    - Clearly reveal important details present in the Current Plot Raw Text
+    - May include minor additional interpretation, but no new facts
+  - **Regular Success**:
+    - Reveal expected information directly supported by the Current Plot Raw Text
+  - **Fail**:
+    - Withhold key information or provide vague, incomplete observations
+  - **Fumble (Worst Fail)**:
+    - Introduce negative consequences, risks, or misleading interpretations, but do NOT fabricate new world facts
 
-* If `Resolved Check Summary` is provided, the relevant check has already been resolved this turn.
+- Information constraints (STRICT):
+  - The Current Plot Raw Text is the primary and authoritative source
+  - Retrieved clues are supplementary and may contain information intended for other scenes. 
+  - Do NOT introduce clue information unless it is clearly supported by the Current Plot Raw Text
+  - If no additional relevant information exists in the Current Plot Raw Text:
+    - Do NOT invent new details
+    - Do NOT create new objects, locations, or hidden elements (e.g., secret compartments, traces, entities)
+    - Instead, refine, confirm, or reinterpret existing visible details only
 
-  * Do **NOT** ask the player to repeat that same roll.
-  * If `Skill Check Result` is unavailable, still treat the check as resolved and narrate consequences without requesting another roll.
-
-* Do not fabricate information. Only use information available in the provided context.
-
-  * If the result is a success but no relevant information exists in the context, do not invent new details.
-
-* Do not mention system processing, hidden prompts, or any tooling in the narrative.
+- Do not mention system processing, hidden prompts, or any tooling in the narrative.
 
 # INSTRUCTION
 
 Generate the next narrative response.
 
 Requirements:
+- Respond to the player by describing NPC reactions and changes in the scene, strictly based on the Current Plot Raw Text. 
 - Move story toward Plot Goal.
 - Maintain consistency with Memory.
-- Use Retrieved Knowledge only if relevant.
 - Preserve immersion.
-- If `Input Consumed By Transition` is true, the latest player input has already been used to legally enter the current node. Do not treat it as a second fresh action inside this node.
-- If `Input Consumed By Transition` is true, use `Transition Trigger Input` only as background motivation for why the investigator arrived here.
-- If `Input Consumed By Transition` is true, start inside the current target node and establish its first playable beats before presenting any further branch or exit possibilities.
-- Do not narrate leaving, exhausting, or wrapping a newly entered target node on the same response unless the script excerpt itself resolves immediately on entry.
-- If `Scene Entry Turn` is true and `Player Input` is empty, write this response as the opening narration for the current scene/plot.
-- If `Scene Entry Turn` is true and `Player Input` is not empty, write this response as the first playable continuation of the current scene/plot while still responding to the player's latest action.
-- `Scene Entry Turn` does NOT mean a separate pre-plot phase. The current plot has already started.
 
 ---
 
@@ -138,21 +113,14 @@ Requirements:
 Player Input:
 {user_input}
 
-Input Consumed By Transition:
-{input_consumed_by_transition}
-
-Entry Relationship:
-{entry_relationship}
-
-Transition Trigger Input:
-{transition_trigger_input}
-
 ---
 
 # SCRIPT STATE
 
 Scene ID: {scene_id}  
+Scene Name: {scene_name}
 Plot ID: {plot_id}
+Plot Name: {plot_name}
 
 Scene Goal:
 {current_scene_goal}
@@ -163,11 +131,13 @@ Scene Description:
 Plot Goal:
 {current_plot_goal}
 
-Current Plot Excerpt:
-{current_plot_excerpt}
+Current Plot Raw Text:
+This is the most important reference. It is from the original script. Please read it carefully and follow the instructions provided.
+{current_plot_raw_text}
 
-Scene Entry Turn:
-{scene_entry_turn}
+Global Story Summary: 
+This provides an overview of the entire story. You should progress the narrative according to this main storyline.
+{script_summary}
 
 ---
 
@@ -175,6 +145,12 @@ Scene Entry Turn:
 
 Previous Plot Summary:
 {previous_plot_summary}
+
+Current Scene Summary:
+{current_scene_summary}
+
+Long-Term Memory:
+{long_term_memory}
 
 Recent Conversation:
 {recent_conversation}
@@ -189,115 +165,52 @@ NPC:
 Player:
 {player_related_info}
 
-Location:
-{location_related_info}
+Setting:
+{setting}
 
-World Rules:
-{game_rule_info}
+Clue:
+- Retrieved dynamically during the story
+- Do NOT reveal spoilers beyond the current context
+- Treat as supplementary information only
+- Prioritize the Current Plot Raw Text over clues in most cases
 
-World Context:
-{world_context_info}
-
-Hidden Truth (Keeper-only):
-{truth_related_info}
-
-Items / Clues:
-{item_or_clue_info}
-
----
-
-# INTERNAL STATE
-
-Active Plot Objective:
-{active_plot_objective}
-
-Objective Checklist:
-{objective_checklist_summary}
-
-Completion Signals:
-{completion_signals_summary}
-
-Plot Exit Conditions:
-{plot_exit_conditions_summary}
-
-Current Scene Boundary:
-{current_scene_boundary_summary}
-
-Current Node Kind:
-{current_node_kind}
-
-Current Hub Status:
-{current_hub_status}
-
-Redirect State:
-{redirect_state_summary}
-
-Latest Player Alignment:
-{latest_alignment_summary}
-
-Latest Handoff Candidate:
-{latest_handoff_candidate_summary}
-
-Latest Transition Context:
-{transition_context_summary}
-
-Allowed Targets:
-{allowed_targets_summary}
-
-Eligible Targets:
-{eligible_targets_summary}
-
-Indirect Targets Via Return:
-{indirect_targets_summary}
-
-Eligible Branch Targets:
-{eligible_branch_targets_summary}
-
-Eligible Exit Targets:
-{eligible_exit_targets_summary}
-
-Exhausted Targets:
-{exhausted_targets_summary}
-
-Blocked Targets:
-{blocked_targets_summary}
-
-Remaining Required Targets:
-{remaining_required_targets_summary}
-
-Return Target:
-{return_target_summary}
-
-Latest Agent Turn Excerpt:
-{latest_agent_turn_excerpt}
-
-Latest Turn State:
-{latest_turn_state_summary}
-
-Choice Prompt Active:
-{choice_prompt_active}
-
-Opening Choice Allowed:
-{opening_choice_allowed}
-
-Visited Scene Branches:
-{visited_scene_ids_summary}
-
-Visited Plot Branches:
-{visited_plot_ids_summary}
+{clue}
 
 ---
 
 # DICE CHECK RESULT
-
-Resolved Check Summary:
-{resolved_check_summary}
 
 Dice Result:
 {dice_result}
 
 Skill Check Result:
 {skill_check_result}
+
+---
+# OTHER SCENE INFORMATION
+
+If the current scene is sufficiently explored (i.e., no meaningful information remains in the Current Plot Raw Text), you may guide the player naturally toward the next scene. This transition should feel seamless and in-world (e.g., through narration, NPC actions, or environmental cues)
+
+Next Scene Name:
+{next_scene_name}
+
+Next Scene Description:
+{next_scene_description}
+
+Unvisited Scene Name:
+{unvisited_scene_name}
+
+Visited Scene Name:
+{visited_scene_name}
+
+---
+# OTHER PLOT INFORMATION
+
+These represent the possible plot directions or next progressions within the current scene. Provide subtle hints when it helps guide progression.
+
+Unvisited Plot Name:
+{unvisited_plot_name}
+
 """
 
 ROLL_CHECK_PROMPT_TEMPLATE = """# SYSTEM PROMPT
@@ -332,6 +245,7 @@ Examples when checks are needed:
 - Searching for hidden evidence -> Spot Hidden
 - Reading strange documents -> Library Use
 - Staying calm before horror -> SAN
+- Forcing a stuck door -> STR
 - Dodging an attack -> Dodge
 
 Tool usage format reference:
@@ -345,7 +259,9 @@ Player Input:
 {user_input}
 
 Scene ID: {scene_id}
+Scene Name: {scene_name}
 Plot ID: {plot_id}
+Plot Name: {plot_name}
 Scene Goal:
 {current_scene_goal}
 
@@ -355,11 +271,14 @@ Scene Description:
 Plot Goal:
 {current_plot_goal}
 
-Current Plot Excerpt:
-{current_plot_excerpt}
+Current Plot Raw Text:
+{current_plot_raw_text}
 
 Previous Plot Summary:
 {previous_plot_summary}
+
+Current Scene Summary:
+{current_scene_summary}
 
 Recent Conversation:
 {recent_conversation}
@@ -367,14 +286,191 @@ Recent Conversation:
 Player:
 {player_related_info}
 
-Allowed Targets:
-{allowed_targets_summary}
-
-Current Hub Status:
-{current_hub_status}
-
 Full Player Skill List:
 {player_skill_list}
+"""
+
+BRANCH_TRANSITION_PROMPT_TEMPLATE = """Your task is to decide whether to:
+- stay in the current plot, or
+- move to another plot or scene
+
+---
+
+### Core Principle
+
+- Scene transitions represent narrative progression. 
+- A change in location usually indicates a scene transition, unless clearly part of the same scene.
+- The decision must be grounded in the Current Plot Raw Text and Player Explicit Decision.
+
+---
+
+### Decision Rules
+
+Switch (move to another plot or scene) if ANY of the following is true:
+
+1. Explicit user intent
+
+- The user clearly expresses intent to move to another place or activity
+- This ALWAYS triggers a switch, regardless of the current scene or plot state
+- If the user previously expressed such intent but the system did not switch, and the current scene does not match that intent, you MUST switch now.
+- Example: "I leave and go to the library"
+
+2. The current scene is sufficiently explored
+
+A scene is considered sufficiently explored when:
+
+- Most meaningful information in the Current Plot Raw Text has already been extracted  
+  OR  
+- The player has attempted most obvious actions
+
+This judgment of sufficiently explored is based on the Current Plot Raw Text, NOT on newly generated narrative content.
+
+Examples of "sufficiently explored"
+
+- The Current Plot Raw Text no longer provides new actionable information
+- The player has completed the main interactions (e.g., asking key questions, checking obvious locations)
+- The next scene represents a natural progression of the story
+- The transition does NOT require player choice
+- The next scene may occur in the SAME location or nearby
+
+---
+
+### Conflict Resolution (CRITICAL)
+
+- If there is ANY conflict between:
+  - player intent or movement
+  - sufficiently explored
+
+→ ALWAYS follow player intent (SWITCH)
+
+--
+
+### Target Selection Rule
+
+When selecting the next scene:
+
+- Choose the scene that best matches the script progression and the player's intended location or activity.
+- If multiple candidates exist:
+  - Prefer unvisited scenes
+  - If still tied, choose the **earlier** one in the list. Later scenes typically depend on earlier ones and should not be selected first.
+
+---
+
+### Default Behavior (IMPORTANT)
+
+- If you are uncertain whether the scene is complete → SWITCH to the next scene
+- If the user moves to a different location → SWITCH
+- Only STAY if BOTH conditions are clearly true:
+  - There is remaining meaningful information in the Current Plot Raw Text
+  - The player is actively interacting with that remaining content
+
+---
+
+### Output (STRICT JSON)
+
+{branch_decision_json}
+
+---
+
+### Notes
+
+- Scene transitions are narrative (temporal or logical), not purely spatial
+- Revisiting scenes/plots is allowed but uncommon
+
+---
+
+Inputs:
+
+Recent Conversation (last 3 rounds, from previous to latest):
+This is the MOST IMPORTANT signal of the player's intent.
+
+- If the player clearly expresses a desire to move to another location or start a different activity → you MUST switch.
+- Player intent ALWAYS takes priority over all other rules.
+- Player location persists across turns:
+  - If the player previously moved to a new location, you must assume they are still there unless explicitly stated otherwise.
+  - If the player’s current location does NOT match the current scene → you MUST switch.
+- Even if the system failed to switch previously, you MUST correct it now.
+
+{global_recent_conversation}
+
+Long-Term Memory:
+Provides background context and previously discovered information.
+Use it to maintain consistency, but DO NOT use it to override the player’s current intent.
+
+{long_term_memory}
+
+Current Plot Raw Text:
+This is the MOST IMPORTANT reference for determining whether the current plot is complete.
+
+- If the player has already explored the main actionable content in this plot → you should switch.
+- If no new meaningful information or actions remain → you should switch.
+- This judgment must be based ONLY on the raw plot content, NOT on newly generated narrative. 
+  - If the narrative suggests continuing exploration, BUT the raw text contains no new actionable information → the plot is already fully explored → you should switch.
+
+{current_plot_raw_text}
+
+---
+
+Global Story Summary:
+This defines the main storyline. 
+Base your scene and plot transition decisions on this summary to ensure the narrative progresses smoothly and in the intended direction. 
+Do not switch to content that significantly deviates from the main progression.
+
+{script_summary}
+
+---
+Current Scene:
+{current_scene}
+
+Unvisited Scenes:
+{unvisited_scenes}
+
+Visited Scenes:
+{visited_scenes}
+
+---
+Current Plot:
+{current_plot}
+
+Unvisited Plots (within current scene):
+{unvisited_plots}
+
+Visited Plots (within current scene):
+{visited_plots}
+"""
+
+LONG_TERM_MEMORY_UPDATE_PROMPT_TEMPLATE = """The conversation has been updated. Update the long-term memory by summarizing the current story state.
+
+Goal:
+Produce a concise summary that supports reasoning, branch decisions, and response generation, while preserving all information relevant to story progression. 
+
+Instructions:
+- Merge the previous long_term_memory with the recent conversation.
+- Produce a concise summary, but preserve all information that is relevant to story progression and decision-making.
+- Do not omit important details in order to shorten the summary.
+- Explicitly track:
+  1. User actions (what the player has done)
+  2. Confirmed information (facts learned from the world or NPCs)
+  3. Clues (potentially important hints or leads)
+  4. User hypotheses (player assumptions, guesses, or interpretations)
+
+Requirements:
+- Maximum 4 sentences.
+- Use clear and explicit language.
+- Avoid vague phrases (e.g., "some exploration", "various actions").
+- Preserve important entities (names, locations, objects).
+- Do NOT introduce new information not present in the conversation.
+
+Input:
+
+Current long-term memory:
+{current_long_term_memory}
+
+Recent conversation (last 3 rounds):
+{recent_conversation}
+
+Output:
+Updated long-term memory (<= 4 sentences, cumulative and state-focused).
 """
 
 KP_OPENING_MARKER = '[KP_OPENING]'
@@ -382,112 +478,44 @@ KP_OPENING_MARKER = '[KP_OPENING]'
 
 class NarrativeState(TypedDict, total=False):
     scene_id: str
+    scene_name: str
     plot_id: str
-    plot_progress: float
-    scene_progress: float
-    navigation_state: dict[str, Any]
-    current_visit_id: int
+    plot_name: str
     player_profile: dict[str, Any]
     conversation_history: list[dict[str, Any]]
     global_conversation_history: list[dict[str, Any]]
     retrieved_docs: list[dict[str, Any]]
     latest_user_input: str
-    effective_user_input: str
-    transition_trigger_input: str
-    input_consumed_by_transition: bool
-    entry_relationship: str
     prompt: str
     roll_check_prompt: str
     retrieval_queries: list[str]
     response: str
     dice_result: str | None
     skill_check_result: str | None
-    resolved_check_summary: str
     need_check: bool
     check_skill: str
     check_reason: str
     dice_type: str
-    plot_completed: bool
-    scene_completed: bool
     scene_goal: str
     scene_description: str
     plot_goal: str
     current_plot_raw_text: str
-    scene_entry_turn: bool
-    current_navigation: dict[str, Any]
-    active_plot_objective: str
-    objective_checklist_summary: str
-    completion_signals_summary: str
-    plot_exit_conditions_summary: str
-    current_scene_boundary_summary: str
-    allowed_targets: list[dict[str, Any]]
-    allowed_targets_summary: str
-    eligible_targets: list[dict[str, Any]]
-    eligible_targets_summary: str
-    indirect_targets_via_return: list[dict[str, Any]]
-    indirect_targets_summary: str
-    eligible_branch_targets_summary: str
-    eligible_exit_targets_summary: str
-    exhausted_targets: list[dict[str, Any]]
-    exhausted_targets_summary: str
-    blocked_targets: list[dict[str, Any]]
-    blocked_targets_summary: str
-    remaining_required_targets: list[dict[str, Any]]
-    remaining_required_targets_summary: str
-    return_target: dict[str, Any] | None
-    return_target_summary: str
-    current_node_kind: str
-    scene_node_kind: str
-    plot_node_kind: str
-    hub_progress: dict[str, Any]
-    current_hub_status: str
-    hub_exit_available: bool
-    redirect_streak: int
-    last_alignment: str
-    last_handoff_candidate_summary: str
-    redirect_state_summary: str
-    latest_transition: dict[str, Any]
-    transition_context_summary: str
-    latest_alignment: str
-    latest_alignment_summary: str
-    latest_handoff_candidate_summary: str
-    latest_agent_turn_excerpt: str
-    latest_turn_state: dict[str, Any]
-    latest_turn_state_summary: str
-    current_turn_state: dict[str, Any]
-    intent_alignment: str
-    intent_action: str
-    intent_target_kind: str
-    intent_target_id: str
-    intent_transition_path: str
-    intent_close_current: bool
-    intent_reason: str
-    choice_prompt_active: bool
-    opening_choice_allowed: bool
-    visited_scene_ids: list[str]
-    visited_plot_ids: list[str]
-    next_plot_goal: str
-    next_plot_excerpt: str
-    next_scene_goal: str
-    next_scene_plot_goal: str
-    next_scene_plot_excerpt: str
-    latest_turn_text: str
+    setting: str
+    clue: str
     previous_plot_summary: str
     current_scene_summary: str
-    plot_advance_action: str
-    plot_advance_target_kind: str
-    plot_advance_target_id: str
-    plot_advance_transition_path: str
-    plot_advance_close_current: bool
-    plot_advance_reason: str
-    scene_completion_reason: str
-    pre_response_transition_applied: bool
-    pre_response_transition_action: str
-    pre_response_transition_target_kind: str
-    pre_response_transition_target_id: str
-    pre_response_transition_path: str
-    pre_response_transition_close_current: bool
-    pre_response_transition_reason: str
+    long_term_memory: str
+    script_summary: str
+    visited_scenes: list[str]
+    visited_plots: list[str]
+    transition_switch: bool
+    transition_target_plot_id: str
+    previous_scene_id: str
+    previous_plot_id: str
+    previous_scene_name: str
+    previous_plot_name: str
+    previous_scene_goal: str
+    previous_plot_goal: str
     output_language: str
     debug_prompts: list[dict[str, str]]
 
@@ -504,23 +532,20 @@ class NarrativeAgent:
         workflow = StateGraph(NarrativeState)
         workflow.add_node('build_prompt', self.build_prompt)
         workflow.add_node('retrieve_memory', self.retrieve_memory)
-        workflow.add_node('pre_response_transition', self.pre_response_transition)
+        workflow.add_node('decide_branch_transition', self.decide_branch_transition)
         workflow.add_node('generate_retrieval_queries', self.generate_retrieval_queries)
         workflow.add_node('vector_retrieve', self.vector_retrieve)
         workflow.add_node('construct_context', self.construct_context)
         workflow.add_node('check_whether_roll_dice', self.check_whether_roll_dice)
         workflow.add_node('roll_dice', self.roll_dice)
         workflow.add_node('generate_response', self.generate_response)
-        workflow.add_node('extract_turn_state', self.extract_turn_state)
         workflow.add_node('write_memory', self.write_memory)
-        workflow.add_node('check_plot_completion', self.check_plot_completion)
-        workflow.add_node('check_scene_completion', self.check_scene_completion)
-        workflow.add_node('update_state', self.update_state)
+        workflow.add_node('finalize_turn_state', self.finalize_turn_state)
 
         workflow.set_entry_point('build_prompt')
         workflow.add_edge('build_prompt', 'retrieve_memory')
-        workflow.add_edge('retrieve_memory', 'pre_response_transition')
-        workflow.add_edge('pre_response_transition', 'generate_retrieval_queries')
+        workflow.add_edge('retrieve_memory', 'decide_branch_transition')
+        workflow.add_edge('decide_branch_transition', 'generate_retrieval_queries')
         workflow.add_edge('generate_retrieval_queries', 'vector_retrieve')
         workflow.add_edge('vector_retrieve', 'construct_context')
         workflow.add_edge('construct_context', 'check_whether_roll_dice')
@@ -533,12 +558,9 @@ class NarrativeAgent:
             },
         )
         workflow.add_edge('roll_dice', 'generate_response')
-        workflow.add_edge('generate_response', 'extract_turn_state')
-        workflow.add_edge('extract_turn_state', 'write_memory')
-        workflow.add_edge('write_memory', 'check_plot_completion')
-        workflow.add_edge('check_plot_completion', 'check_scene_completion')
-        workflow.add_edge('check_scene_completion', 'update_state')
-        workflow.add_edge('update_state', END)
+        workflow.add_edge('generate_response', 'write_memory')
+        workflow.add_edge('write_memory', 'finalize_turn_state')
+        workflow.add_edge('finalize_turn_state', END)
         return workflow.compile()
 
     def run_turn(self, user_input: str) -> dict[str, Any]:
@@ -547,101 +569,29 @@ class NarrativeAgent:
         state: NarrativeState = {
             'scene_id': system_state.get('current_scene_id', ''),
             'plot_id': system_state.get('current_plot_id', ''),
-            'plot_progress': float(system_state.get('plot_progress', 0.0)),
-            'scene_progress': float(system_state.get('scene_progress', 0.0)),
-            'navigation_state': system_state.get('navigation_state', {}) or {},
-            'current_visit_id': int(system_state.get('current_visit_id', 0) or 0),
             'output_language': system_state.get('output_language', 'English'),
             'player_profile': self.db.get_player_profile(),
             'latest_user_input': user_input,
-            'effective_user_input': user_input,
-            'transition_trigger_input': '',
-            'input_consumed_by_transition': False,
-            'entry_relationship': 'none',
             'conversation_history': [],
             'global_conversation_history': [],
             'retrieved_docs': [],
+            'scene_name': '',
+            'plot_name': '',
             'current_plot_raw_text': '',
-            'scene_entry_turn': False,
-            'current_navigation': {},
-            'active_plot_objective': '',
-            'objective_checklist_summary': 'None',
-            'completion_signals_summary': 'None',
-            'plot_exit_conditions_summary': 'None',
-            'current_scene_boundary_summary': 'None',
-            'allowed_targets': [],
-            'allowed_targets_summary': 'None',
-            'eligible_targets': [],
-            'eligible_targets_summary': 'None',
-            'indirect_targets_via_return': [],
-            'indirect_targets_summary': 'None',
-            'eligible_branch_targets_summary': 'None',
-            'eligible_exit_targets_summary': 'None',
-            'exhausted_targets': [],
-            'exhausted_targets_summary': 'None',
-            'blocked_targets': [],
-            'blocked_targets_summary': 'None',
-            'remaining_required_targets': [],
-            'remaining_required_targets_summary': 'None',
-            'return_target': None,
-            'return_target_summary': 'None',
-            'current_node_kind': 'linear',
-            'scene_node_kind': 'linear',
-            'plot_node_kind': 'linear',
-            'hub_progress': {},
-            'current_hub_status': 'None',
-            'hub_exit_available': False,
-            'redirect_streak': 0,
-            'last_alignment': '',
-            'last_handoff_candidate_summary': 'None',
-            'redirect_state_summary': 'redirect_streak=0; last_alignment=none; last_handoff_candidate=None',
-            'latest_transition': {},
-            'transition_context_summary': 'None',
-            'latest_alignment': 'none',
-            'latest_alignment_summary': 'none',
-            'latest_handoff_candidate_summary': 'None',
-            'latest_agent_turn_excerpt': 'None',
-            'latest_turn_state': {},
-            'latest_turn_state_summary': 'choice_open=false; beat_status=open; offered_targets=None; summary=None',
-            'current_turn_state': {},
-            'intent_alignment': 'none',
-            'intent_action': 'stay',
-            'intent_target_kind': '',
-            'intent_target_id': '',
-            'intent_transition_path': 'stay',
-            'intent_close_current': False,
-            'intent_reason': '',
-            'choice_prompt_active': False,
-            'opening_choice_allowed': False,
-            'visited_scene_ids': [],
-            'visited_plot_ids': [],
-            'next_plot_goal': '',
-            'next_plot_excerpt': '',
-            'next_scene_goal': '',
-            'next_scene_plot_goal': '',
-            'next_scene_plot_excerpt': '',
-            'latest_turn_text': '',
+            'setting': 'None',
+            'clue': 'None',
+            'long_term_memory': '',
+            'script_summary': '',
             'dice_result': None,
             'skill_check_result': None,
-            'resolved_check_summary': '',
             'need_check': False,
             'check_skill': '',
             'check_reason': '',
             'dice_type': '',
-            'plot_advance_action': 'stay',
-            'plot_advance_target_kind': '',
-            'plot_advance_target_id': '',
-            'plot_advance_transition_path': 'stay',
-            'plot_advance_close_current': False,
-            'plot_advance_reason': '',
-            'scene_completion_reason': '',
-            'pre_response_transition_applied': False,
-            'pre_response_transition_action': 'stay',
-            'pre_response_transition_target_kind': '',
-            'pre_response_transition_target_id': '',
-            'pre_response_transition_path': 'stay',
-            'pre_response_transition_close_current': False,
-            'pre_response_transition_reason': '',
+            'visited_scenes': [],
+            'visited_plots': [],
+            'transition_switch': False,
+            'transition_target_plot_id': '',
             'debug_prompts': [],
         }
         result = self.graph.invoke(state)
@@ -651,142 +601,52 @@ class NarrativeAgent:
     def generate_initial_response(self) -> dict[str, Any]:
         self.latest_debug_prompts = []
         system_state = self.db.get_system_state()
-        state: NarrativeState = {
-            'scene_id': system_state.get('current_scene_id', ''),
-            'plot_id': system_state.get('current_plot_id', ''),
-            'plot_progress': float(system_state.get('plot_progress', 0.0)),
-            'scene_progress': float(system_state.get('scene_progress', 0.0)),
-            'navigation_state': system_state.get('navigation_state', {}) or {},
-            'current_visit_id': int(system_state.get('current_visit_id', 0) or 0),
-            'output_language': system_state.get('output_language', 'English'),
-            'player_profile': self.db.get_player_profile(),
-            'latest_user_input': '',
-            'effective_user_input': '',
-            'transition_trigger_input': '',
-            'input_consumed_by_transition': False,
-            'entry_relationship': 'none',
-            'conversation_history': [],
-            'global_conversation_history': [],
+        scene_id = str(system_state.get('current_scene_id', '') or '')
+        plot_id = str(system_state.get('current_plot_id', '') or '')
+        if not scene_id or not plot_id:
+            return {
+                'scene_id': scene_id,
+                'plot_id': plot_id,
+                'response': '',
+                'retrieved_docs': [],
+                'dice_result': None,
+                'skill_check_result': None,
+                'debug_prompts': [],
+            }
+        if self.db.has_global_opening(KP_OPENING_MARKER):
+            row = self.db.conn.execute(
+                "SELECT agent FROM memory WHERE user = ? ORDER BY id ASC LIMIT 1",
+                (KP_OPENING_MARKER,),
+            ).fetchone()
+            visit_state: NarrativeState = {'visited_scenes': [], 'visited_plots': []}
+            self._load_visited_state(visit_state)
+            self._mark_visited(visit_state, scene_id, plot_id)
+            self._save_visited_state(visit_state)
+            self.latest_debug_prompts = []
+            return {
+                'scene_id': scene_id,
+                'plot_id': plot_id,
+                'response': str(row['agent']) if row else '',
+                'retrieved_docs': [],
+                'dice_result': None,
+                'skill_check_result': None,
+                'debug_prompts': [],
+            }
+        opening = self._generate_scene_opening(scene_id, plot_id)
+        self.db.append_memory(scene_id, plot_id, KP_OPENING_MARKER, opening)
+        visit_state: NarrativeState = {'visited_scenes': [], 'visited_plots': []}
+        self._load_visited_state(visit_state)
+        self._mark_visited(visit_state, scene_id, plot_id)
+        self._save_visited_state(visit_state)
+        return {
+            'scene_id': scene_id,
+            'plot_id': plot_id,
+            'response': opening,
             'retrieved_docs': [],
-            'current_plot_raw_text': '',
-            'scene_entry_turn': False,
-            'current_navigation': {},
-            'active_plot_objective': '',
-            'objective_checklist_summary': 'None',
-            'completion_signals_summary': 'None',
-            'plot_exit_conditions_summary': 'None',
-            'current_scene_boundary_summary': 'None',
-            'allowed_targets': [],
-            'allowed_targets_summary': 'None',
-            'eligible_targets': [],
-            'eligible_targets_summary': 'None',
-            'indirect_targets_via_return': [],
-            'indirect_targets_summary': 'None',
-            'eligible_branch_targets_summary': 'None',
-            'eligible_exit_targets_summary': 'None',
-            'exhausted_targets': [],
-            'exhausted_targets_summary': 'None',
-            'blocked_targets': [],
-            'blocked_targets_summary': 'None',
-            'remaining_required_targets': [],
-            'remaining_required_targets_summary': 'None',
-            'return_target': None,
-            'return_target_summary': 'None',
-            'current_node_kind': 'linear',
-            'scene_node_kind': 'linear',
-            'plot_node_kind': 'linear',
-            'hub_progress': {},
-            'current_hub_status': 'None',
-            'hub_exit_available': False,
-            'redirect_streak': 0,
-            'last_alignment': '',
-            'last_handoff_candidate_summary': 'None',
-            'redirect_state_summary': 'redirect_streak=0; last_alignment=none; last_handoff_candidate=None',
-            'latest_transition': {},
-            'transition_context_summary': 'None',
-            'latest_alignment': 'none',
-            'latest_alignment_summary': 'none',
-            'latest_handoff_candidate_summary': 'None',
-            'latest_agent_turn_excerpt': 'None',
-            'latest_turn_state': {},
-            'latest_turn_state_summary': 'choice_open=false; beat_status=open; offered_targets=None; summary=None',
-            'current_turn_state': {},
-            'intent_alignment': 'none',
-            'intent_action': 'stay',
-            'intent_target_kind': '',
-            'intent_target_id': '',
-            'intent_transition_path': 'stay',
-            'intent_close_current': False,
-            'intent_reason': '',
-            'choice_prompt_active': False,
-            'opening_choice_allowed': False,
-            'visited_scene_ids': [],
-            'visited_plot_ids': [],
-            'next_plot_goal': '',
-            'next_plot_excerpt': '',
-            'next_scene_goal': '',
-            'next_scene_plot_goal': '',
-            'next_scene_plot_excerpt': '',
-            'latest_turn_text': '',
             'dice_result': None,
             'skill_check_result': None,
-            'resolved_check_summary': '',
-            'need_check': False,
-            'check_skill': '',
-            'check_reason': '',
-            'dice_type': '',
-            'plot_advance_action': 'stay',
-            'plot_advance_target_kind': '',
-            'plot_advance_target_id': '',
-            'plot_advance_transition_path': 'stay',
-            'plot_advance_close_current': False,
-            'plot_advance_reason': '',
-            'scene_completion_reason': '',
-            'pre_response_transition_applied': False,
-            'pre_response_transition_action': 'stay',
-            'pre_response_transition_target_kind': '',
-            'pre_response_transition_target_id': '',
-            'pre_response_transition_path': 'stay',
-            'pre_response_transition_close_current': False,
-            'pre_response_transition_reason': '',
-            'debug_prompts': [],
+            'debug_prompts': list(self.latest_debug_prompts),
         }
-        state = self.retrieve_memory(state)
-        state = self.pre_response_transition(state)
-        state = self.generate_retrieval_queries(state)
-        state = self.vector_retrieve(state)
-        state = self.generate_response(state)
-        state = self.extract_turn_state(state)
-        self.db.append_memory(
-            state['scene_id'],
-            state['plot_id'],
-            '',
-            state.get('response', ''),
-            visit_id=int(state.get('current_visit_id', 0) or 0),
-            turn_state=state.get('current_turn_state'),
-        )
-        self.latest_debug_prompts = state.get('debug_prompts', [])
-        return state
-
-    def ensure_kp_opening(self, scene_id: str, plot_id: str) -> str | None:
-        self.latest_debug_prompts = []
-        if not scene_id or not plot_id:
-            return None
-        if not self._is_initial_story_position(scene_id, plot_id):
-            return None
-        visit_id = int(self.db.get_system_state().get('current_visit_id', 0) or 0)
-        if self.db.has_scene_opening(scene_id, KP_OPENING_MARKER, visit_id=visit_id):
-            return None
-        opening = self._generate_scene_opening(scene_id, plot_id)
-        self.db.append_memory(
-            scene_id,
-            plot_id,
-            KP_OPENING_MARKER,
-            opening,
-            visit_id=visit_id,
-            turn_state={},
-        )
-        return opening
 
     def set_debug_mode(self, enabled: bool) -> None:
         self.debug_mode = bool(enabled)
@@ -799,11 +659,9 @@ class NarrativeAgent:
             state.setdefault('debug_prompts', []).append(entry)
         self.latest_debug_prompts.append(entry)
 
-    def _llm_call(self, prompt: str, *, step_name: str, model: str | None = None) -> str:
+    def _llm_call(self, prompt: str, *, step_name: str) -> str:
         logger.info("LLM step=%s prompt_length=%s", step_name, len(prompt))
-        # Do not hardcode NVIDIA/Qwen model ids here; backend/model is selected by
-        # llm_backend.txt (or LLM_PROVIDER) and OPENAI_MODEL/NVIDIA_MODEL env vars.
-        return call_llm(prompt, model=model, step_name=step_name).strip()
+        return call_llm(prompt, step_name=step_name).strip()
 
     def _get_output_language(self, state: NarrativeState | None = None) -> str:
         if state and state.get('output_language'):
@@ -831,517 +689,230 @@ class NarrativeAgent:
             lines.extend(f"{k}:{v}" for k, v in derived.items())
         return '\n'.join(lines) or 'No player skills available.'
 
-    def _format_recent_conversation(
-        self,
-        state: NarrativeState,
-        rounds: int = 3,
-        history_key: str = 'conversation_history',
-    ) -> str:
-        history = state.get(history_key, [])[-rounds:]
-        if not history:
+    def _format_recent_conversation(self, history: list[dict[str, Any]] | None, rounds: int = 3) -> str:
+        turns = (history or [])[-rounds:]
+        if not turns:
             return 'None'
         lines: list[str] = []
-        for turn in history:
+        for turn in turns:
             user_text = str(turn.get('user', '')).strip() or '(no player input)'
             keeper_text = str(turn.get('agent', '')).strip() or '(no keeper response)'
+            if user_text == KP_OPENING_MARKER:
+                lines.append(f"Keeper: {keeper_text}")
+                continue
             lines.append(f"Player: {user_text}")
             lines.append(f"Keeper: {keeper_text}")
         return '\n'.join(lines)
 
-    def _target_descriptor(self, target_kind: str, target_id: str) -> str:
-        if not target_kind or not target_id:
-            return 'stay'
-        return f'{target_kind}:{target_id}'
-
-    def _list_summary(self, items: list[str]) -> str:
-        if not items:
-            return 'None'
-        return ', '.join(items)
-
-    def _format_hub_status(self, state: NarrativeState) -> str:
-        current_id = state.get('plot_id') or state.get('scene_id') or ''
-        hub_progress = state.get('hub_progress', {}) or {}
-        current = hub_progress.get(current_id, {})
-        if not current:
-            return 'No active hub.'
-        progress = float(current.get('progress', 0.0) or 0.0)
-        policy = str(current.get('completion_policy', 'terminal_on_resolve'))
-        return f"policy={policy}; progress={progress:.0%}"
-
-    def _transition_payload(
-        self,
-        action: str,
-        target_kind: str,
-        target_id: str,
-        transition_path: str,
-        close_current: bool,
-        reason: str,
-    ) -> dict[str, Any]:
-        return {
-            'action': action,
-            'target_kind': target_kind,
-            'target_id': target_id,
-            'transition_path': transition_path,
-            'close_current': bool(close_current),
-            'reason': reason,
-        }
-
-    def _activate_story_position(self, scene_id: str, plot_id: str) -> None:
-        if not scene_id or not plot_id:
-            return
-        scene = self.db.get_scene(scene_id) or {}
-        plot = self.db.get_plot(plot_id) or {}
-        if scene and str(scene.get('status', 'pending')) not in {'completed', 'skipped'}:
-            self.db.update_scene(scene_id, {'status': 'in_progress'})
-        if plot and str(plot.get('status', 'pending')) not in {'completed', 'skipped'}:
-            self.db.update_plot(plot_id, status='in_progress')
-
-    def _is_initial_story_position(self, scene_id: str, plot_id: str) -> bool:
-        scenes = self.db.list_scenes()
-        if not scenes:
-            return False
-        first_scene = scenes[0]
-        first_plot = (first_scene.get('plots') or [{}])[0]
-        return scene_id == first_scene.get('scene_id') and plot_id == first_plot.get('plot_id')
-
     def _parse_roll_check_response(self, text: str) -> dict[str, Any]:
-        candidates: list[str] = []
-        raw_text = (text or '').strip()
-        if not raw_text:
+        match = re.search(r'\{.*\}', text, flags=re.DOTALL)
+        payload = match.group(0) if match else text
+        data = json5.loads(payload)
+        if not isinstance(data, dict):
             return {}
-        fenced_blocks = re.findall(r'```(?:json)?\s*(.*?)```', raw_text, flags=re.IGNORECASE | re.DOTALL)
-        for block in fenced_blocks:
-            stripped = block.strip()
-            if stripped:
-                candidates.append(stripped)
-        match = re.search(r'\{.*\}', raw_text, flags=re.DOTALL)
-        if match:
-            candidates.append(match.group(0))
-        candidates.append(raw_text)
+        return data
 
-        loaders = [json.loads]
-        if json5 is not None:
-            loaders.append(json5.loads)
+    def _json_dumps(self, value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False)
 
-        for candidate in candidates:
-            for loader in loaders:
-                try:
-                    data = loader(candidate)
-                except Exception:
-                    continue
-                if isinstance(data, dict):
-                    return data
-        return {}
-
-    def _roll_check_aliases(self, state: NarrativeState) -> dict[str, list[str]]:
-        aliases: dict[str, list[str]] = {
-            'APP': ['app', 'appearance', '外貌'],
-            'Brawl': ['brawl', 'fighting (brawl)', 'fighting', '斗殴', '格斗'],
-            'Charm': ['charm', '魅惑'],
-            'CON': ['con', 'constitution', '体质'],
-            'Credit Rating': ['credit rating', 'credit', '信用评级', '信用'],
-            'DEX': ['dex', 'dexterity', '敏捷'],
-            'Dodge': ['dodge', '闪避'],
-            'EDU': ['edu', 'education', '教育'],
-            'Fast Talk': ['fast talk', '话术', '快速交谈'],
-            'Firearms': ['firearms', 'shooting', '枪械', '射击'],
-            'INT': ['int', 'intelligence', '智力'],
-            'Intimidate': ['intimidate', 'intimidation', '恐吓'],
-            'Law': ['law', '法律'],
-            'Library Use': ['library use', 'library', '图书馆使用'],
-            'Listen': ['listen', '聆听'],
-            'Luck': ['luck', '幸运'],
-            'Navigate': ['navigate', '导航', '领航'],
-            'Persuade': ['persuade', 'persuasion', '说服'],
-            'POW': ['pow', 'power', '意志'],
-            'Psychology': ['psychology', '心理学'],
-            'SAN': ['san', 'sanity', '理智'],
-            'SIZ': ['siz', 'size', '体型'],
-            'Spot Hidden': ['spot hidden', '侦查'],
-            'STR': ['str', 'strength', '力量'],
-            'Track': ['track', 'tracking', '追踪'],
+    def _scene_brief(self, scene: dict[str, Any] | None) -> dict[str, str]:
+        scene = scene or {}
+        return {
+            'id': str(scene.get('scene_id', '')),
+            'name': str(scene.get('scene_name', '')),
+            'goal': str(scene.get('scene_goal', '')),
+            'description': str(scene.get('scene_description', '')),
         }
-        profile = state.get('player_profile', {}) or {}
-        for bucket_name in ('occupation', 'personal_interest'):
-            for entry in profile.get('chosen_skill_allocations', {}).get(bucket_name, []):
-                parsed = self._extract_named_value(str(entry))
-                if not parsed:
-                    continue
-                skill_name, _skill_value = parsed
-                aliases.setdefault(skill_name, [skill_name.lower()])
-        for attr_group in ('characteristics', 'derived_attributes'):
-            for skill_name in profile.get(attr_group, {}):
-                key = str(skill_name)
-                aliases.setdefault(key, [key.lower()])
-        return aliases
 
-    def _refresh_resolved_check_summary(self, state: NarrativeState) -> None:
-        dice_result = str(state.get('dice_result') or '').strip()
-        skill_check_result = str(state.get('skill_check_result') or '').strip()
-        check_label = str(state.get('check_skill') or state.get('check_reason') or 'skill check').strip()
-        if skill_check_result:
-            state['resolved_check_summary'] = (
-                f"The {check_label} is already resolved this turn: {skill_check_result}. "
-                f"Recorded roll: {dice_result or 'already applied'}."
-            )
-            return
-        if dice_result:
-            state['resolved_check_summary'] = (
-                f"The {check_label} has already been rolled this turn. "
-                f"Recorded roll: {dice_result}. Do not ask for the same check again."
-            )
-            return
-        state['resolved_check_summary'] = ''
+    def _plot_brief(self, plot: dict[str, Any] | None) -> dict[str, str]:
+        plot = plot or {}
+        return {
+            'id': str(plot.get('plot_id', '')),
+            'name': str(plot.get('plot_name', '')),
+            'goal': str(plot.get('plot_goal', '')),
+        }
 
-    def _trim_redundant_check_request(self, text: str) -> str:
-        response = (text or '').strip()
-        if not response:
-            return response
-        cleaned = re.sub(
-            r'[\(（][^()（）]{0,160}(?:check|roll|检定|骰子|骰|技能)[^()（）]{0,160}[\)）]',
-            '',
-            response,
-            flags=re.IGNORECASE,
+    def _format_scene_names(self, scenes: list[dict[str, Any]]) -> str:
+        names = [
+            str(scene.get('scene_name', '') or scene.get('scene_id', '')).strip()
+            for scene in scenes
+            if str(scene.get('scene_name', '') or scene.get('scene_id', '')).strip()
+        ]
+        return '\n'.join(f"- {name}" for name in names) or 'None'
+
+    def _find_scene_and_plot(self, plot_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        for scene in self.db.list_scenes():
+            for plot in scene.get('plots', []):
+                if str(plot.get('plot_id', '')) == plot_id:
+                    return scene, plot
+        return None, None
+
+    def _resolve_target_plot_id(self, target_plot_id: str) -> str:
+        target_plot_id = str(target_plot_id or '').strip()
+        if not target_plot_id:
+            return ''
+        target_scene, target_plot = self._find_scene_and_plot(target_plot_id)
+        if target_scene and target_plot:
+            return target_plot_id
+        for scene in self.db.list_scenes():
+            if str(scene.get('scene_id', '')) != target_plot_id:
+                continue
+            plots = scene.get('plots', [])
+            if not plots:
+                return ''
+            return str(plots[0].get('plot_id', '') or '')
+        return target_plot_id
+
+    def _load_visited_state(self, state: NarrativeState) -> None:
+        nav = self.db.get_system_state().get('navigation_state', {}) or {}
+        visited_scenes = nav.get('visited_scenes', [])
+        visited_plots = nav.get('visited_plots', [])
+        state['visited_scenes'] = [str(item) for item in visited_scenes if str(item)]
+        state['visited_plots'] = [str(item) for item in visited_plots if str(item)]
+        state['long_term_memory'] = str(nav.get('long_term_memory', '') or '')
+
+    def _save_visited_state(self, state: NarrativeState) -> None:
+        navigation_state = self.db.get_system_state().get('navigation_state', {}) or {}
+        navigation_state.update(
+            {
+                'visited_scenes': sorted(set(state.get('visited_scenes', []))),
+                'visited_plots': sorted(set(state.get('visited_plots', []))),
+                'long_term_memory': str(
+                    state.get('long_term_memory', navigation_state.get('long_term_memory', '')) or ''
+                ),
+            }
         )
-        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-        return cleaned.strip()
+        self.db.update_system_state(
+            {
+                'navigation_state': navigation_state
+            }
+        )
+
+    def _mark_visited(self, state: NarrativeState, scene_id: str | None = None, plot_id: str | None = None) -> None:
+        scene_id = str(scene_id or state.get('scene_id', '') or '')
+        plot_id = str(plot_id or state.get('plot_id', '') or '')
+        if scene_id:
+            state['visited_scenes'] = sorted(set(state.get('visited_scenes', []) + [scene_id]))
+        if plot_id:
+            state['visited_plots'] = sorted(set(state.get('visited_plots', []) + [plot_id]))
+
+    def _hydrate_current_context(self, state: NarrativeState) -> None:
+        scene = self.db.get_scene(state.get('scene_id', ''))
+        state['scene_name'] = ''
+        state['scene_goal'] = ''
+        state['scene_description'] = ''
+        state['current_scene_summary'] = ''
+        state['plot_name'] = ''
+        state['plot_goal'] = ''
+        state['current_plot_raw_text'] = ''
+        state['previous_plot_summary'] = ''
+        state['script_summary'] = self.db.get_summary('script')
+        if not scene:
+            return
+        state['scene_name'] = scene.get('scene_name', '')
+        state['scene_goal'] = scene.get('scene_goal', '')
+        state['scene_description'] = scene.get('scene_description', '')
+        state['current_scene_summary'] = scene.get('scene_summary', '')
+        for plot in scene.get('plots', []):
+            if str(plot.get('plot_id', '')) == state.get('plot_id', ''):
+                state['plot_name'] = plot.get('plot_name', '')
+                state['plot_goal'] = plot.get('plot_goal', '')
+                state['current_plot_raw_text'] = truncate_plot_raw_text(plot.get('raw_text', ''))
+                state['previous_plot_summary'] = self.db.get_summary(
+                    'plot',
+                    scene_id=state.get('scene_id', ''),
+                    plot_id=state.get('plot_id', ''),
+                )
+                break
+
+    def _branch_prompt(self, state: NarrativeState) -> str:
+        scenes = self.db.list_scenes()
+        current_scene = self.db.get_scene(state.get('scene_id', '')) or {}
+        current_plot = self.db.get_plot(state.get('plot_id', '')) or {}
+        visited_scenes = set(state.get('visited_scenes', []))
+        visited_plots = set(state.get('visited_plots', []))
+        current_scene_plots = current_scene.get('plots', []) if current_scene else []
+        branch_history = list(state.get('global_conversation_history', []))
+        if state.get('latest_user_input'):
+            branch_history.append({'user': state.get('latest_user_input', ''), 'agent': ''})
+        return BRANCH_TRANSITION_PROMPT_TEMPLATE.format(
+            branch_decision_json='{\n  "switch": true/false,\n  "target_plot_id": "scene_x_plot_y" or ""\n}',
+            global_recent_conversation=self._format_recent_conversation(branch_history, rounds=3),
+            script_summary=state.get('script_summary', '') or 'None',
+            long_term_memory=state.get('long_term_memory', '') or 'None',
+            current_plot_raw_text=state.get('current_plot_raw_text', '') or 'None',
+            current_scene=self._json_dumps(self._scene_brief(current_scene)),
+            unvisited_scenes=self._json_dumps([self._scene_brief(scene) for scene in scenes if str(scene.get('scene_id', '')) not in visited_scenes]),
+            visited_scenes=self._json_dumps([self._scene_brief(scene) for scene in scenes if str(scene.get('scene_id', '')) in visited_scenes]),
+            current_plot=self._json_dumps(self._plot_brief(current_plot)),
+            unvisited_plots=self._json_dumps([self._plot_brief(plot) for plot in current_scene_plots if str(plot.get('plot_id', '')) not in visited_plots]),
+            visited_plots=self._json_dumps([self._plot_brief(plot) for plot in current_scene_plots if str(plot.get('plot_id', '')) in visited_plots]),
+        )
+
+    def _parse_branch_decision(self, text: str) -> dict[str, Any]:
+        match = re.search(r'\{.*\}', text, flags=re.DOTALL)
+        payload = match.group(0) if match else text
+        data = json5.loads(payload)
+        return data if isinstance(data, dict) else {}
 
     def build_prompt(self, state: NarrativeState) -> NarrativeState:
         return state
 
-    def _transition_targets_current_node(self, state: NarrativeState) -> bool:
-        latest_transition = state.get('latest_transition') or {}
-        if not isinstance(latest_transition, dict):
-            return False
-        target_scene_id = str(latest_transition.get('target_scene_id', '') or '')
-        target_plot_id = str(latest_transition.get('target_plot_id', '') or '')
-        if target_scene_id != str(state.get('scene_id', '') or ''):
-            return False
-        if target_plot_id and target_plot_id != str(state.get('plot_id', '') or ''):
-            return False
-        return True
-
-    def _derive_entry_input_state(self, state: NarrativeState) -> None:
-        latest_transition = state.get('latest_transition') or {}
-        relationship = ''
-        if isinstance(latest_transition, dict):
-            relationship = str(latest_transition.get('relationship', '') or '')
-        scene_entry_turn = bool(state.get('scene_entry_turn', False))
-        transition_targets_current = self._transition_targets_current_node(state)
-        consumed = bool(
-            state.get('pre_response_transition_applied')
-            and scene_entry_turn
-            and transition_targets_current
-            and relationship.startswith('pre_response_')
-        )
-        state['input_consumed_by_transition'] = consumed
-        state['entry_relationship'] = relationship if scene_entry_turn and transition_targets_current and relationship else ('scene_opening' if scene_entry_turn else 'none')
-        state['transition_trigger_input'] = state.get('latest_user_input', '') if consumed else ''
-        state['effective_user_input'] = '' if consumed else state.get('latest_user_input', '')
-
     def retrieve_memory(self, state: NarrativeState) -> NarrativeState:
-        visit_id = int(state.get('current_visit_id', 0) or 0)
-        state['conversation_history'] = self.db.get_recent_turns(
-            state['scene_id'],
-            state['plot_id'],
-            limit=12,
-            visit_id=visit_id,
-        )
+        state['conversation_history'] = self.db.get_recent_turns(state['scene_id'], state['plot_id'], limit=12)
         state['global_conversation_history'] = self.db.get_global_recent_turns(limit=12)
-        scene = self.db.get_scene(state['scene_id'])
-        hints = story_position_context(
-            self.db,
-            state['scene_id'],
-            state['plot_id'],
-            navigation_state=state.get('navigation_state'),
-            current_visit_id=visit_id,
-        )
-        state['current_plot_raw_text'] = hints.get('current_plot_raw_text', '')
-        state['current_navigation'] = hints.get('current_navigation', {})
-        state['active_plot_objective'] = hints.get('active_plot_objective', '')
-        state['objective_checklist_summary'] = hints.get('objective_checklist_summary', 'None')
-        state['completion_signals_summary'] = hints.get('completion_signals_summary', 'None')
-        state['plot_exit_conditions_summary'] = hints.get('plot_exit_conditions_summary', 'None')
-        state['current_scene_boundary_summary'] = hints.get('current_scene_boundary_summary', 'None')
-        state['latest_agent_turn_excerpt'] = hints.get('latest_agent_turn_excerpt', 'None')
-        state['latest_turn_state'] = hints.get('latest_turn_state', {})
-        state['latest_turn_state_summary'] = hints.get('latest_turn_state_summary', 'choice_open=false; beat_status=open; offered_targets=None; summary=None')
-        state['choice_prompt_active'] = bool(hints.get('choice_prompt_active', False))
-        state['opening_choice_allowed'] = bool(hints.get('opening_choice_allowed', False))
-        state['allowed_targets'] = hints.get('allowed_targets', [])
-        state['allowed_targets_summary'] = hints.get('allowed_targets_summary', 'None')
-        state['eligible_targets'] = hints.get('eligible_targets', [])
-        state['eligible_targets_summary'] = hints.get('eligible_targets_summary', 'None')
-        state['indirect_targets_via_return'] = hints.get('indirect_targets_via_return', [])
-        state['indirect_targets_summary'] = hints.get('indirect_targets_summary', 'None')
-        state['eligible_branch_targets_summary'] = hints.get('eligible_branch_targets_summary', 'None')
-        state['eligible_exit_targets_summary'] = hints.get('eligible_exit_targets_summary', 'None')
-        state['exhausted_targets'] = hints.get('exhausted_targets', [])
-        state['exhausted_targets_summary'] = hints.get('exhausted_targets_summary', 'None')
-        state['blocked_targets'] = hints.get('blocked_targets', [])
-        state['blocked_targets_summary'] = hints.get('blocked_targets_summary', 'None')
-        state['remaining_required_targets'] = hints.get('remaining_required_targets', [])
-        state['remaining_required_targets_summary'] = hints.get('remaining_required_targets_summary', 'None')
-        state['return_target'] = hints.get('return_target')
-        state['return_target_summary'] = hints.get('return_target_summary', 'None')
-        state['current_node_kind'] = hints.get('current_node_kind', 'linear')
-        state['scene_node_kind'] = hints.get('scene_node_kind', 'linear')
-        state['plot_node_kind'] = hints.get('plot_node_kind', 'linear')
-        state['visited_scene_ids'] = hints.get('visited_scene_ids', [])
-        state['visited_plot_ids'] = hints.get('visited_plot_ids', [])
-        state['hub_progress'] = hints.get('hub_progress', {})
-        state['current_hub_status'] = hints.get('current_hub_status', 'No active hub.')
-        state['hub_exit_available'] = bool(hints.get('hub_exit_available', False))
-        state['redirect_streak'] = int(hints.get('redirect_streak', 0) or 0)
-        state['last_alignment'] = hints.get('last_alignment', '')
-        state['last_handoff_candidate_summary'] = hints.get('last_handoff_candidate_summary', 'None')
-        state['redirect_state_summary'] = hints.get('redirect_state_summary', 'redirect_streak=0; last_alignment=none; last_handoff_candidate=None')
-        state['latest_transition'] = hints.get('latest_transition', {})
-        state['transition_context_summary'] = hints.get('transition_context_summary', 'None')
-        state['next_plot_goal'] = hints.get('next_plot_goal', '')
-        state['next_plot_excerpt'] = hints.get('next_plot_excerpt', '')
-        state['next_scene_goal'] = hints.get('next_scene_goal', '')
-        state['next_scene_plot_goal'] = hints.get('next_scene_plot_goal', '')
-        state['next_scene_plot_excerpt'] = hints.get('next_scene_plot_excerpt', '')
-        state['plot_progress'] = float(hints.get('plot_progress', state.get('plot_progress', 0.0)))
-        state['scene_progress'] = float(hints.get('scene_progress', state.get('scene_progress', 0.0)))
-        state['current_turn_state'] = {}
-        if scene:
-            state['scene_goal'] = scene.get('scene_goal', '')
-            state['scene_description'] = scene.get('scene_description', '')
-            state['current_scene_summary'] = scene.get('scene_summary', '')
-            plots = scene.get('plots', [])
-            for i, plot in enumerate(plots):
-                if plot['plot_id'] == state['plot_id']:
-                    state['plot_goal'] = plot.get('plot_goal', '')
-                    if i > 0:
-                        prev_plot = plots[i - 1]['plot_id']
-                        state['previous_plot_summary'] = self.db.get_summary('plot', scene_id=state['scene_id'], plot_id=prev_plot)
-                    else:
-                        state['previous_plot_summary'] = ''
-                    break
-            state['scene_entry_turn'] = not bool(state.get('conversation_history'))
-        self._derive_entry_input_state(state)
-        if (state.get('latest_user_input') or '').strip() and not state.get('pre_response_transition_applied'):
-            alignment = classify_player_alignment(
-                state.get('latest_user_input', ''),
-                plot_goal=state.get('plot_goal', ''),
-                scene_goal=state.get('scene_goal', ''),
-                scene_description=state.get('scene_description', ''),
-                current_plot_raw_text=state.get('current_plot_raw_text', ''),
-                allowed_targets=state.get('allowed_targets', []),
-                indirect_targets_via_return=state.get('indirect_targets_via_return', []),
-                remaining_required_targets=state.get('remaining_required_targets', []),
-                redirect_streak=int(state.get('redirect_streak', 0) or 0),
-                latest_agent_turn_excerpt=state.get('latest_agent_turn_excerpt', ''),
-                latest_turn_state=state.get('latest_turn_state', {}),
-                choice_prompt_active=bool(state.get('choice_prompt_active', False)),
-                current_node_kind=state.get('current_node_kind', 'linear'),
-                conversation_history=state.get('conversation_history', []),
-            )
-            candidate = alignment.get('candidate_target')
-            state['intent_alignment'] = str(alignment.get('alignment', 'current_plot'))
-            state['intent_action'] = str(alignment.get('action', 'stay'))
-            state['intent_target_kind'] = str(alignment.get('target_kind', ''))
-            state['intent_target_id'] = str(alignment.get('target_id', ''))
-            state['intent_transition_path'] = str(alignment.get('transition_path', 'stay'))
-            state['intent_close_current'] = bool(alignment.get('close_current', False))
-            state['intent_reason'] = str(alignment.get('reason', ''))
-            state['latest_alignment'] = state['intent_alignment']
-            state['latest_alignment_summary'] = str(alignment.get('summary', 'none'))
-            if candidate:
-                state['latest_handoff_candidate_summary'] = self._target_descriptor(
-                    str(candidate.get('target_kind', '')),
-                    str(candidate.get('target_id', '')),
-                )
-            else:
-                state['latest_handoff_candidate_summary'] = 'None'
-        elif not (state.get('latest_user_input') or '').strip():
-            state['intent_alignment'] = 'none'
-            state['intent_action'] = 'stay'
-            state['intent_target_kind'] = ''
-            state['intent_target_id'] = ''
-            state['intent_transition_path'] = 'stay'
-            state['intent_close_current'] = False
-            state['intent_reason'] = ''
-            state['latest_alignment'] = 'none'
-            state['latest_alignment_summary'] = 'none'
-            state['latest_handoff_candidate_summary'] = 'None'
-        else:
-            state['latest_alignment'] = state.get('intent_alignment', state.get('latest_alignment', 'none'))
-            state['latest_alignment_summary'] = state.get('latest_alignment_summary', 'none')
-            if not state.get('latest_handoff_candidate_summary'):
-                state['latest_handoff_candidate_summary'] = 'None'
+        self._load_visited_state(state)
+        self._hydrate_current_context(state)
+        self._mark_visited(state)
         return state
 
-    def pre_response_transition(self, state: NarrativeState) -> NarrativeState:
-        if not (state.get('latest_user_input') or '').strip():
+    def decide_branch_transition(self, state: NarrativeState) -> NarrativeState:
+        state['transition_switch'] = False
+        state['transition_target_plot_id'] = ''
+        prompt = self._branch_prompt(state)
+        self._record_prompt(state, 'branch_transition_prompt', prompt)
+        try:
+            raw = self._llm_call(prompt, step_name='branch_transition_decision')
+            decision = self._parse_branch_decision(raw)
+            logger.info(f"PARSED: {decision}")
+        except Exception as exc:
+            logger.error("Branch transition decision failed error=%s", exc)
+            decision = {}
+        target_plot_id = self._resolve_target_plot_id(decision.get('target_plot_id', ''))
+        logger.info(f"Resolved target_plot: {target_plot_id}")
+        switch_value = decision.get('switch', False)
+        requested_switch = switch_value.strip().lower() == 'true' if isinstance(switch_value, str) else bool(switch_value)
+        should_switch = requested_switch and target_plot_id and target_plot_id != state.get('plot_id', '')
+        target_scene, target_plot = self._find_scene_and_plot(target_plot_id)
+        if not should_switch or not target_scene or not target_plot:
             return state
 
-        evaluation = evaluate_pre_response_transition(
-            state['latest_user_input'],
-            plot_goal=state.get('plot_goal', ''),
-            scene_goal=state.get('scene_goal', ''),
-            scene_description=state.get('scene_description', ''),
-            current_plot_raw_text=state.get('current_plot_raw_text', ''),
-            current_node_kind=state.get('current_node_kind', 'linear'),
-            allowed_targets=state.get('allowed_targets', []),
-            indirect_targets_via_return=state.get('indirect_targets_via_return', []),
-            remaining_required_targets=state.get('remaining_required_targets', []),
-            return_target=state.get('return_target'),
-            redirect_streak=int(state.get('redirect_streak', 0) or 0),
-            latest_agent_turn_excerpt=state.get('latest_agent_turn_excerpt', ''),
-            latest_turn_state=state.get('latest_turn_state', {}),
-            choice_prompt_active=bool(state.get('choice_prompt_active', False)),
-            conversation_history=state.get('global_conversation_history', []),
-            prompt_recorder=lambda prompt: self._record_prompt(state, 'pre_response_transition_prompt', prompt),
-        )
-        action = str(evaluation.get('action', 'stay'))
-        target_kind = str(evaluation.get('target_kind', ''))
-        target_id = str(evaluation.get('target_id', ''))
-        transition_path = str(evaluation.get('transition_path', 'stay'))
-        close_current = bool(evaluation.get('close_current', False))
-        reason = str(evaluation.get('reason', ''))
-        state['pre_response_transition_action'] = action
-        state['pre_response_transition_target_kind'] = target_kind
-        state['pre_response_transition_target_id'] = target_id
-        state['pre_response_transition_path'] = transition_path
-        state['pre_response_transition_close_current'] = close_current
-        state['pre_response_transition_reason'] = reason
-        state['intent_action'] = action
-        state['intent_target_kind'] = target_kind
-        state['intent_target_id'] = target_id
-        state['intent_transition_path'] = transition_path
-        state['intent_close_current'] = close_current
-        state['intent_reason'] = reason
+        state['transition_switch'] = True
+        state['transition_target_plot_id'] = target_plot_id
+        state['previous_scene_id'] = state.get('scene_id', '')
+        state['previous_plot_id'] = state.get('plot_id', '')
+        state['previous_scene_name'] = state.get('scene_name', '')
+        state['previous_plot_name'] = state.get('plot_name', '')
+        state['previous_scene_goal'] = state.get('scene_goal', '')
+        state['previous_plot_goal'] = state.get('plot_goal', '')
 
-        if action != 'target':
-            return state
-
-        origin_scene_id = state.get('scene_id', '')
-        origin_plot_id = state.get('plot_id', '')
-        if not origin_scene_id or not origin_plot_id:
-            return state
-
-        origin_state: NarrativeState = dict(state)
-        origin_state['plot_completed'] = close_current
-        origin_state['plot_progress'] = 1.0 if close_current else float(state.get('plot_progress', 0.0))
-        origin_state['plot_advance_action'] = action
-        origin_state['plot_advance_target_kind'] = target_kind
-        origin_state['plot_advance_target_id'] = target_id
-        origin_state['plot_advance_transition_path'] = transition_path
-        origin_state['plot_advance_close_current'] = close_current
-        origin_state['plot_advance_reason'] = reason
-        origin_state['response'] = ''
-
-        if close_current:
-            self.db.update_plot(origin_plot_id, status='completed', progress=1.0)
-            self.db.save_summary(
-                'plot',
-                self._build_plot_summary(origin_state),
-                scene_id=origin_scene_id,
-                plot_id=origin_plot_id,
-            )
-        else:
-            self.db.update_plot(origin_plot_id, status='in_progress', progress=float(state.get('plot_progress', 0.0)))
-
-        latest_turn_text = (
-            f"User: {state.get('latest_user_input', '')}\n"
-            "Agent: (transition pending)"
-        )
-        transition = self._transition_payload(action, target_kind, target_id, transition_path, close_current, reason)
-        scene_evaluation = evaluate_scene_completion(
-            self.db,
-            origin_scene_id,
-            current_plot_id=origin_plot_id,
-            plot_transition=transition,
-            navigation_state=state.get('navigation_state'),
-            conversation_history=state.get('conversation_history', []),
-            latest_turn_text=latest_turn_text,
-            prompt_recorder=lambda prompt: self._record_prompt(state, 'pre_response_scene_completion_prompt', prompt),
-        )
-        origin_scene_completed = bool(scene_evaluation.get('completed', False))
-        origin_scene_progress = float(scene_evaluation.get('progress', state.get('scene_progress', 0.0) or 0.0))
-
-        if origin_scene_completed:
-            origin_state['scene_completion_reason'] = str(scene_evaluation.get('reason', ''))
-            scene_summary = self._build_scene_summary(origin_scene_id, state=origin_state)
-            self.db.update_scene(origin_scene_id, {'status': 'completed', 'scene_summary': scene_summary})
-            self.db.save_summary('scene', scene_summary, scene_id=origin_scene_id)
-        else:
-            self.db.update_scene(origin_scene_id, {'status': 'in_progress'})
-
-        next_pos = next_story_position(
-            self.db,
-            origin_scene_id,
-            origin_plot_id,
-            navigation_state=state.get('navigation_state'),
-            advance_decision=transition,
-            current_visit_id=int(state.get('current_visit_id', 0) or 0),
-        )
-        target_scene = self.db.get_scene(next_pos.get('current_scene_id', '')) or {}
-        target_plot = self.db.get_plot(next_pos.get('current_plot_id', '')) or {}
-        next_pos['navigation_state'] = set_latest_transition_context(
-            next_pos.get('navigation_state'),
-            source_scene_id=origin_scene_id,
-            source_plot_id=origin_plot_id,
-            source_scene_goal=state.get('scene_goal', ''),
-            source_plot_goal=state.get('plot_goal', ''),
-            target_scene_id=next_pos.get('current_scene_id', ''),
-            target_plot_id=next_pos.get('current_plot_id', ''),
-            target_scene_goal=target_scene.get('scene_goal', ''),
-            target_plot_goal=target_plot.get('plot_goal', ''),
-            transition_reason=reason,
-            latest_user_input=state.get('latest_user_input', ''),
-            latest_agent_response='',
-            relationship='pre_response_via_return_handoff' if transition_path == 'via_return' else 'pre_response_handoff',
-        )
-        self._activate_story_position(next_pos.get('current_scene_id', ''), next_pos.get('current_plot_id', ''))
+        state['scene_id'] = str(target_scene.get('scene_id', ''))
+        state['plot_id'] = str(target_plot.get('plot_id', ''))
         self.db.update_system_state(
             {
-                'current_scene_id': next_pos.get('current_scene_id', ''),
-                'current_plot_id': next_pos.get('current_plot_id', ''),
-                'plot_progress': float(next_pos.get('plot_progress', 0.0)),
-                'scene_progress': float(next_pos.get('scene_progress', origin_scene_progress)),
-                'current_scene_intro': next_pos.get('current_scene_intro', ''),
-                'navigation_state': next_pos.get('navigation_state', state.get('navigation_state', {})),
-                'current_visit_id': int(next_pos.get('current_visit_id', state.get('current_visit_id', 0) or 0)),
+                'current_scene_id': state['scene_id'],
+                'current_plot_id': state['plot_id'],
             }
         )
-        state['scene_id'] = next_pos['current_scene_id']
-        state['plot_id'] = next_pos['current_plot_id']
-        state['plot_progress'] = float(next_pos.get('plot_progress', 0.0))
-        state['scene_progress'] = float(next_pos.get('scene_progress', origin_scene_progress))
-        state['navigation_state'] = next_pos.get('navigation_state', state.get('navigation_state', {}))
-        state['current_visit_id'] = int(next_pos.get('current_visit_id', state.get('current_visit_id', 0) or 0))
-        state['plot_advance_action'] = action
-        state['plot_advance_target_kind'] = target_kind
-        state['plot_advance_target_id'] = target_id
-        state['plot_advance_transition_path'] = transition_path
-        state['plot_advance_close_current'] = close_current
-        state['plot_advance_reason'] = reason
-        state['scene_completion_reason'] = str(scene_evaluation.get('reason', ''))
-        state['pre_response_transition_applied'] = True
-        state['plot_completed'] = False
-        state['scene_completed'] = False
-        state['latest_turn_text'] = latest_turn_text
-        state['retrieved_docs'] = []
-        state['prompt'] = ''
-        state['roll_check_prompt'] = ''
-        state['dice_result'] = None
-        state['skill_check_result'] = None
-        state['resolved_check_summary'] = ''
-        state['need_check'] = False
-        state['check_skill'] = ''
-        state['check_reason'] = ''
-        state['dice_type'] = ''
-        state['retrieval_queries'] = []
-        state['response'] = ''
-        return self.retrieve_memory(state)
+        state['conversation_history'] = self.db.get_recent_turns(state['scene_id'], state['plot_id'], limit=12)
+        self._hydrate_current_context(state)
+        self._mark_visited(state)
+        self._save_visited_state(state)
+        return state
 
     def generate_retrieval_queries(self, state: NarrativeState) -> NarrativeState:
         state['retrieval_queries'] = generate_retrieval_queries(
-            state.get('effective_user_input', state.get('latest_user_input', '')),
+            state['latest_user_input'],
             state.get('plot_goal', ''),
             state.get('conversation_history', []),
         )
@@ -1356,21 +927,24 @@ class NarrativeAgent:
 
     def construct_context(self, state: NarrativeState) -> NarrativeState:
         categorized = categorize_docs(state.get('retrieved_docs', []))
+        state['setting'] = categorized['setting']
+        state['clue'] = categorized['clue']
         player_skill_list = self._format_player_skill_list(state)
-        recent_conversation = self._format_recent_conversation(state, rounds=2, history_key='global_conversation_history')
+        recent_conversation = self._format_recent_conversation(state.get('global_conversation_history', []), rounds=2)
         state['roll_check_prompt'] = ROLL_CHECK_PROMPT_TEMPLATE.format(
-            user_input=state.get('effective_user_input', state.get('latest_user_input', '')),
+            user_input=state['latest_user_input'],
             scene_id=state.get('scene_id', ''),
+            scene_name=state.get('scene_name', '') or 'None',
             plot_id=state.get('plot_id', ''),
+            plot_name=state.get('plot_name', '') or 'None',
             current_scene_goal=state.get('scene_goal', '') or 'None',
             current_scene_description=state.get('scene_description', '') or 'None',
             current_plot_goal=state.get('plot_goal', '') or 'None',
-            current_plot_excerpt=state.get('current_plot_raw_text', '') or 'None',
+            current_plot_raw_text=state.get('current_plot_raw_text', '') or 'None',
             previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
+            current_scene_summary=state.get('current_scene_summary', '') or 'None',
             recent_conversation=recent_conversation,
             player_related_info=str(state.get('player_profile', {})),
-            allowed_targets_summary=state.get('eligible_targets_summary', 'None'),
-            current_hub_status=state.get('current_hub_status', 'No active hub.'),
             player_skill_list=player_skill_list,
         )
         self._record_prompt(state, 'roll_check_prompt', state['roll_check_prompt'])
@@ -1380,21 +954,10 @@ class NarrativeAgent:
         try:
             raw = self._llm_call(state['roll_check_prompt'], step_name='check_whether_roll_dice')
             parsed = self._parse_roll_check_response(raw)
-            if parsed:
-                state['need_check'] = bool(parsed.get('need_check', False))
-                if state['need_check']:
-                    state['check_skill'] = str(parsed.get('skill', '')).strip()
-                    state['check_reason'] = str(parsed.get('reason', '')).strip() or state['check_skill'] or 'skill check'
-                    state['dice_type'] = str(parsed.get('dice_type', '')).strip() or '1d100'
-                else:
-                    state['check_skill'] = ''
-                    state['check_reason'] = ''
-                    state['dice_type'] = ''
-            else:
-                state['need_check'] = False
-                state['check_skill'] = ''
-                state['check_reason'] = ''
-                state['dice_type'] = ''
+            state['need_check'] = bool(parsed.get('need_check', False))
+            state['check_skill'] = str(parsed.get('skill', '')).strip()
+            state['check_reason'] = str(parsed.get('reason', '')).strip() or state['check_skill'] or 'skill check'
+            state['dice_type'] = str(parsed.get('dice_type', '')).strip() or ('1d100' if state['need_check'] else '')
             logger.info(
                 "Roll check decision need_check=%s skill=%s reason=%s dice_type=%s",
                 state.get('need_check'),
@@ -1408,7 +971,6 @@ class NarrativeAgent:
             state['check_skill'] = ''
             state['check_reason'] = ''
             state['dice_type'] = ''
-        self._refresh_resolved_check_summary(state)
         return state
 
     def roll_dice(self, state: NarrativeState) -> NarrativeState:
@@ -1428,14 +990,22 @@ class NarrativeAgent:
                 state.get('dice_result'),
                 state.get('skill_check_result'),
             )
-        self._refresh_resolved_check_summary(state)
         return state
 
     def generate_response(self, state: NarrativeState) -> NarrativeState:
         try:
             categorized = categorize_docs(state.get('retrieved_docs', []))
-            recent_conversation = self._format_recent_conversation(state, rounds=3, history_key='global_conversation_history')
-            self._refresh_resolved_check_summary(state)
+            recent_conversation = self._format_recent_conversation(state.get('global_conversation_history', []), rounds=3)
+            scenes = self.db.list_scenes()
+            visited_scene_ids = set(state.get('visited_scenes', []))
+            visited_plot_ids = set(state.get('visited_plots', []))
+            current_scene = self.db.get_scene(state.get('scene_id', '')) or {}
+            current_scene_plots = current_scene.get('plots', []) if current_scene else []
+            current_scene_index = next(
+                (idx for idx, scene in enumerate(scenes) if str(scene.get('scene_id', '')) == state.get('scene_id', '')),
+                -1,
+            )
+            next_scene = scenes[current_scene_index + 1] if 0 <= current_scene_index + 1 < len(scenes) else {}
             state['prompt'] = RESPONSE_PROMPT_TEMPLATE.format(
                 agent_role='Narrative Agent',
                 game_system='TRPG',
@@ -1443,60 +1013,46 @@ class NarrativeAgent:
                 narrative_perspective='Second person',
                 response_length='Concise',
                 output_language=self._get_output_language(state),
-                user_input=state.get('effective_user_input', state.get('latest_user_input', '')),
-                input_consumed_by_transition=str(bool(state.get('input_consumed_by_transition', False))).lower(),
-                entry_relationship=state.get('entry_relationship', 'none'),
-                transition_trigger_input=state.get('transition_trigger_input', '') or 'None',
+                user_input=state['latest_user_input'],
                 scene_id=state.get('scene_id', ''),
+                scene_name=state.get('scene_name', '') or 'None',
                 plot_id=state.get('plot_id', ''),
+                plot_name=state.get('plot_name', '') or 'None',
                 current_scene_goal=state.get('scene_goal', '') or 'None',
                 current_scene_description=state.get('scene_description', '') or 'None',
+                next_scene_name=next_scene.get('scene_name', '') or 'None',
+                next_scene_description=next_scene.get('scene_description', '') or 'None',
+                unvisited_scene_name=self._format_scene_names(
+                    [scene for scene in scenes if str(scene.get('scene_id', '')) not in visited_scene_ids]
+                ),
+                visited_scene_name=self._format_scene_names(
+                    [scene for scene in scenes if str(scene.get('scene_id', '')) in visited_scene_ids]
+                ),
+                unvisited_plot_name=self._format_scene_names(
+                    [
+                        {
+                            'scene_name': plot.get('plot_name', '') or plot.get('plot_id', ''),
+                        }
+                        for plot in current_scene_plots
+                        if str(plot.get('plot_id', '')) not in visited_plot_ids
+                    ]
+                ),
                 current_plot_goal=state.get('plot_goal', '') or 'None',
-                current_plot_excerpt=state.get('current_plot_raw_text', '') or 'None',
-                scene_entry_turn='true' if state.get('scene_entry_turn') else 'false',
+                current_plot_raw_text=state.get('current_plot_raw_text', '') or 'None',
                 previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
+                current_scene_summary=state.get('current_scene_summary', '') or 'None',
+                long_term_memory=state.get('long_term_memory', '') or 'None',
+                script_summary=state.get('script_summary', '') or 'None',
                 recent_conversation=recent_conversation,
                 npc_related_info=categorized['npc_related_info'],
                 player_related_info=str(state.get('player_profile', {})),
-                location_related_info=categorized['location_related_info'],
-                game_rule_info=categorized['game_rule_info'],
-                world_context_info=categorized['world_context_info'],
-                truth_related_info=categorized['truth_related_info'],
-                item_or_clue_info=categorized['item_or_clue_info'],
-                active_plot_objective=state.get('active_plot_objective', '') or 'None',
-                objective_checklist_summary=state.get('objective_checklist_summary', 'None'),
-                completion_signals_summary=state.get('completion_signals_summary', 'None'),
-                plot_exit_conditions_summary=state.get('plot_exit_conditions_summary', 'None'),
-                current_scene_boundary_summary=state.get('current_scene_boundary_summary', 'None'),
-                current_node_kind=state.get('current_node_kind', 'linear'),
-                current_hub_status=state.get('current_hub_status', 'No active hub.'),
-                redirect_state_summary=state.get('redirect_state_summary', 'redirect_streak=0; last_alignment=none; last_handoff_candidate=None'),
-                latest_alignment_summary=state.get('latest_alignment_summary', 'none'),
-                latest_handoff_candidate_summary=state.get('latest_handoff_candidate_summary', 'None'),
-                transition_context_summary=state.get('transition_context_summary', 'None'),
-                allowed_targets_summary=state.get('allowed_targets_summary', 'None'),
-                eligible_targets_summary=state.get('eligible_targets_summary', 'None'),
-                indirect_targets_summary=state.get('indirect_targets_summary', 'None'),
-                eligible_branch_targets_summary=state.get('eligible_branch_targets_summary', 'None'),
-                eligible_exit_targets_summary=state.get('eligible_exit_targets_summary', 'None'),
-                exhausted_targets_summary=state.get('exhausted_targets_summary', 'None'),
-                blocked_targets_summary=state.get('blocked_targets_summary', 'None'),
-                remaining_required_targets_summary=state.get('remaining_required_targets_summary', 'None'),
-                return_target_summary=state.get('return_target_summary', 'None'),
-                latest_agent_turn_excerpt=state.get('latest_agent_turn_excerpt', 'None'),
-                latest_turn_state_summary=state.get('latest_turn_state_summary', 'choice_open=false; beat_status=open; offered_targets=None; summary=None'),
-                choice_prompt_active=str(bool(state.get('choice_prompt_active', False))).lower(),
-                opening_choice_allowed=str(bool(state.get('opening_choice_allowed', False))).lower(),
-                visited_scene_ids_summary=self._list_summary(state.get('visited_scene_ids', [])),
-                visited_plot_ids_summary=self._list_summary(state.get('visited_plot_ids', [])),
-                resolved_check_summary=state.get('resolved_check_summary') or 'None',
+                setting=state.get('setting', 'None'),
+                clue=state.get('clue', 'None'),
                 dice_result=state.get('dice_result') or 'None',
                 skill_check_result=state.get('skill_check_result') or 'None',
             )
             self._record_prompt(state, 'generate_response_prompt', state['prompt'])
             state['response'] = self._llm_call(state['prompt'], step_name='generate_response')
-            if state.get('resolved_check_summary'):
-                state['response'] = self._trim_redundant_check_request(state.get('response', ''))
         except Exception as e:
             logger.error("LLM error in generate_response prompt_length=%s error=%s", len(state.get('prompt', '')), e)
             print("LLM error:", e)
@@ -1504,209 +1060,50 @@ class NarrativeAgent:
             state['response'] = self._fallback_response(state)
         return state
 
-    def extract_turn_state(self, state: NarrativeState) -> NarrativeState:
-        state['current_turn_state'] = extract_turn_state(
-            state.get('response', ''),
-            current_node_kind=state.get('current_node_kind', 'linear'),
-            allowed_targets=state.get('allowed_targets', []),
-            indirect_targets_via_return=state.get('indirect_targets_via_return', []),
-            prompt_recorder=lambda prompt: self._record_prompt(state, 'turn_state_prompt', prompt),
-        )
-        return state
-
     def write_memory(self, state: NarrativeState) -> NarrativeState:
-        self.db.append_memory(
-            state['scene_id'],
-            state['plot_id'],
-            state['latest_user_input'],
-            state['response'],
-            visit_id=int(state.get('current_visit_id', 0) or 0),
-            turn_state=state.get('current_turn_state'),
-        )
+        self.db.append_memory(state['scene_id'], state['plot_id'], state['latest_user_input'], state['response'])
         return state
 
-    def check_plot_completion(self, state: NarrativeState) -> NarrativeState:
-        if state.get('pre_response_transition_applied'):
-            return state
-        evaluation = evaluate_plot_completion(
-            state['latest_user_input'],
-            state['response'],
-            state.get('plot_progress', 0.0),
-            plot_goal=state.get('plot_goal', ''),
-            scene_goal=state.get('scene_goal', ''),
-            scene_description=state.get('scene_description', ''),
-            current_plot_raw_text=state.get('current_plot_raw_text', ''),
-            current_node_kind=state.get('current_node_kind', 'linear'),
-            allowed_targets=state.get('allowed_targets', []),
-            indirect_targets_via_return=state.get('indirect_targets_via_return', []),
-            remaining_required_targets=state.get('remaining_required_targets', []),
-            redirect_streak=int(state.get('redirect_streak', 0) or 0),
-            latest_agent_turn_excerpt=state.get('latest_agent_turn_excerpt', ''),
-            latest_turn_state=state.get('current_turn_state') or state.get('latest_turn_state', {}),
-            choice_prompt_active=bool(state.get('choice_prompt_active', False)),
-            conversation_history=state.get('conversation_history', []),
-            prompt_recorder=lambda prompt: self._record_prompt(state, 'plot_completion_prompt', prompt),
-        )
-        done = bool(evaluation.get('completed', False))
-        progress = float(evaluation.get('progress', state.get('plot_progress', 0.0)))
-        state['plot_advance_action'] = str(evaluation.get('action', 'stay'))
-        state['plot_advance_target_kind'] = str(evaluation.get('target_kind', ''))
-        state['plot_advance_target_id'] = str(evaluation.get('target_id', ''))
-        state['plot_advance_transition_path'] = str(evaluation.get('transition_path', 'stay'))
-        state['plot_advance_close_current'] = bool(evaluation.get('close_current', False))
-        state['plot_advance_reason'] = str(evaluation.get('reason', ''))
-        state['plot_completed'] = done or bool(state.get('plot_advance_close_current'))
-        state['plot_progress'] = progress
-        handoff_targets = list(state.get('eligible_targets', [])) + list(state.get('indirect_targets_via_return', []))
-        state['navigation_state'] = update_plot_guidance_state(
-            state.get('navigation_state'),
-            plot_id=state.get('plot_id', ''),
-            visit_id=int(state.get('current_visit_id', 0) or 0),
-            alignment=state.get('intent_alignment', state.get('latest_alignment', 'none')),
-            handoff_candidate=next(
-                (
-                    target
-                    for target in handoff_targets
-                    if target.get('target_kind') == state.get('plot_advance_target_kind')
-                    and target.get('target_id') == state.get('plot_advance_target_id')
-                ),
-                None,
-            ),
-        )
-        self.db.update_plot(state['plot_id'], progress=progress)
-        if state['plot_completed']:
-            self.db.update_plot(state['plot_id'], status='completed', progress=1.0)
-            self.db.save_summary(
-                'plot',
-                self._build_plot_summary(state),
-                scene_id=state['scene_id'],
-                plot_id=state['plot_id'],
-            )
-            state['plot_progress'] = 1.0
-        else:
-            self.db.update_plot(state['plot_id'], status='in_progress', progress=progress)
+    def finalize_turn_state(self, state: NarrativeState) -> NarrativeState:
+        self._mark_visited(state)
+        if state.get('transition_switch'):
+            if state.get('previous_plot_id'):
+                self.db.save_summary(
+                    'plot',
+                    self._build_plot_summary(state, previous=True),
+                    scene_id=state.get('previous_scene_id', ''),
+                    plot_id=state.get('previous_plot_id', ''),
+                )
+            if state.get('previous_scene_id') and state.get('previous_scene_id') != state.get('scene_id'):
+                scene_summary = self._build_scene_summary(state.get('previous_scene_id', ''), state=state)
+                self.db.update_scene(state.get('previous_scene_id', ''), {'scene_summary': scene_summary})
+                self.db.save_summary('scene', scene_summary, scene_id=state.get('previous_scene_id', ''))
+        self._update_long_term_memory(state)
+        self._save_visited_state(state)
         return state
 
-    def check_scene_completion(self, state: NarrativeState) -> NarrativeState:
-        if state.get('pre_response_transition_applied'):
-            return state
-        state['latest_turn_text'] = (
-            f"User: {state.get('latest_user_input', '')}\n"
-            f"Agent: {state.get('response', '')}"
-        )
-        transition = self._transition_payload(
-            str(state.get('plot_advance_action', 'stay')),
-            str(state.get('plot_advance_target_kind', '')),
-            str(state.get('plot_advance_target_id', '')),
-            str(state.get('plot_advance_transition_path', 'stay')),
-            bool(state.get('plot_advance_close_current', False)),
-            str(state.get('plot_advance_reason', '')),
-        )
-        evaluation = evaluate_scene_completion(
-            self.db,
-            state['scene_id'],
-            current_plot_id=state.get('plot_id', ''),
-            plot_transition=transition,
-            navigation_state=state.get('navigation_state'),
-            conversation_history=state.get('conversation_history', []),
-            latest_turn_text=state.get('latest_turn_text', ''),
-            prompt_recorder=lambda prompt: self._record_prompt(state, 'scene_completion_prompt', prompt),
-        )
-        done = bool(evaluation.get('completed', False))
-        progress = float(evaluation.get('progress', state.get('scene_progress', 0.0)))
-        state['scene_completion_reason'] = str(evaluation.get('reason', ''))
-        state['scene_completed'] = done
-        state['scene_progress'] = progress
-        if done:
-            scene_summary = self._build_scene_summary(state['scene_id'], state=state)
-            self.db.update_scene(state['scene_id'], {'status': 'completed', 'scene_summary': scene_summary})
-            self.db.save_summary('scene', scene_summary, scene_id=state['scene_id'])
-        else:
-            self.db.update_scene(state['scene_id'], {'status': 'in_progress'})
-        return state
+    def _update_long_term_memory(self, state: NarrativeState) -> None:
+        row = self.db.conn.execute(
+            "SELECT COUNT(*) AS turn_count FROM memory WHERE user <> ?",
+            (KP_OPENING_MARKER,),
+        ).fetchone()
+        turn_count = int(row['turn_count']) if row else 0
+        if turn_count <= 0 or turn_count % 3 != 0:
+            return
 
-    def update_state(self, state: NarrativeState) -> NarrativeState:
-        if state.get('pre_response_transition_applied'):
-            return state
-
-        transition = self._transition_payload(
-            str(state.get('plot_advance_action', 'stay')),
-            str(state.get('plot_advance_target_kind', '')),
-            str(state.get('plot_advance_target_id', '')),
-            str(state.get('plot_advance_transition_path', 'stay')),
-            bool(state.get('plot_advance_close_current', False)),
-            str(state.get('plot_advance_reason', '')),
+        recent_history = self.db.get_global_recent_turns(limit=3)
+        prompt = LONG_TERM_MEMORY_UPDATE_PROMPT_TEMPLATE.format(
+            current_long_term_memory=state.get('long_term_memory', '') or 'None',
+            recent_conversation=self._format_recent_conversation(recent_history, rounds=3),
         )
-        should_advance = bool(
-            state.get('scene_completed')
-            or state.get('plot_completed')
-            or str(state.get('plot_advance_action', 'stay')) == 'target'
-        )
-
-        if should_advance:
-            next_pos = next_story_position(
-                self.db,
-                state['scene_id'],
-                state['plot_id'],
-                navigation_state=state.get('navigation_state'),
-                advance_decision=transition,
-                current_visit_id=int(state.get('current_visit_id', 0) or 0),
-            )
-            target_scene = self.db.get_scene(next_pos.get('current_scene_id', '')) or {}
-            target_plot = self.db.get_plot(next_pos.get('current_plot_id', '')) or {}
-            relationship = 'post_response_handoff'
-            if next_pos.get('current_scene_id', '') == state.get('scene_id', '') and next_pos.get('current_plot_id', '') == state.get('plot_id', ''):
-                relationship = 'stay'
-            elif next_pos.get('current_scene_id', '') == state.get('scene_id', ''):
-                relationship = 'same_scene_plot_transition'
-            elif str(state.get('plot_advance_transition_path', 'stay')) == 'via_return':
-                relationship = 'post_response_via_return_handoff'
-            next_pos['navigation_state'] = set_latest_transition_context(
-                next_pos.get('navigation_state'),
-                source_scene_id=state.get('scene_id', ''),
-                source_plot_id=state.get('plot_id', ''),
-                source_scene_goal=state.get('scene_goal', ''),
-                source_plot_goal=state.get('plot_goal', ''),
-                target_scene_id=next_pos.get('current_scene_id', ''),
-                target_plot_id=next_pos.get('current_plot_id', ''),
-                target_scene_goal=target_scene.get('scene_goal', ''),
-                target_plot_goal=target_plot.get('plot_goal', ''),
-                transition_reason=str(state.get('plot_advance_reason', '')),
-                latest_user_input=state.get('latest_user_input', ''),
-                latest_agent_response=state.get('response', ''),
-                relationship=relationship,
-            )
-            self._activate_story_position(next_pos.get('current_scene_id', ''), next_pos.get('current_plot_id', ''))
-            self.db.update_system_state(
-                {
-                    'current_scene_id': next_pos.get('current_scene_id', ''),
-                    'current_plot_id': next_pos.get('current_plot_id', ''),
-                    'plot_progress': float(next_pos.get('plot_progress', 0.0)),
-                    'scene_progress': float(next_pos.get('scene_progress', 0.0)),
-                    'current_scene_intro': next_pos.get('current_scene_intro', ''),
-                    'navigation_state': next_pos.get('navigation_state', state.get('navigation_state', {})),
-                    'current_visit_id': int(next_pos.get('current_visit_id', state.get('current_visit_id', 0) or 0)),
-                }
-            )
-            state['scene_id'] = next_pos.get('current_scene_id', '')
-            state['plot_id'] = next_pos.get('current_plot_id', '')
-            state['plot_progress'] = float(next_pos.get('plot_progress', 0.0))
-            state['scene_progress'] = float(next_pos.get('scene_progress', 0.0))
-            state['navigation_state'] = next_pos.get('navigation_state', state.get('navigation_state', {}))
-            state['current_visit_id'] = int(next_pos.get('current_visit_id', state.get('current_visit_id', 0) or 0))
-            return self.retrieve_memory(state)
-        else:
-            self.db.update_system_state(
-                {
-                    'current_scene_id': state.get('scene_id', ''),
-                    'current_plot_id': state.get('plot_id', ''),
-                    'plot_progress': state.get('plot_progress', 0.0),
-                    'scene_progress': state.get('scene_progress', 0.0),
-                    'navigation_state': state.get('navigation_state', {}),
-                    'current_visit_id': int(state.get('current_visit_id', 0) or 0),
-                }
-            )
-        return state
+        self._record_prompt(state, 'long_term_memory_update_prompt', prompt)
+        try:
+            updated_memory = self._llm_call(prompt, step_name='long_term_memory_update')
+        except Exception as exc:
+            logger.error("Long-term memory update failed error=%s", exc)
+            return
+        if updated_memory:
+            state['long_term_memory'] = updated_memory
 
     def _roll_dice_expr(self, dice_expr: str) -> str | None:
         m = re.fullmatch(r'\s*(\d*)d(\d+)\s*', (dice_expr or '').lower())
@@ -1799,24 +1196,19 @@ class NarrativeAgent:
 
     def _fallback_response(self, state: NarrativeState) -> str:
         output_language = self._get_output_language(state)
-        user_input = state.get('effective_user_input', state.get('latest_user_input', ''))
-        if not user_input and state.get('input_consumed_by_transition'):
-            user_input = state.get('transition_trigger_input', '')
+        user_input = state['latest_user_input']
         dice_hint = re.search(r'(\d*d\d+)', user_input.lower())
         if dice_hint:
             rolled = self._roll_dice_expr(dice_hint.group(1))
             if rolled:
                 state['dice_result'] = f"{dice_hint.group(1)}: {rolled}"
                 state['skill_check_result'] = None
-        self._refresh_resolved_check_summary(state)
         if output_language == 'Chinese':
             base = f"你的行动是：{user_input}。"
             if state.get('plot_goal'):
                 base += f"剧情正朝着以下目标推进：{state['plot_goal']}。"
-            if state.get('retrieved_docs'):
-                base += f"相关线索：{state['retrieved_docs'][0]['content']}。"
-            if state.get('resolved_check_summary'):
-                base += f"本回合的检定已结算（{state['resolved_check_summary']}）。"
+            if state.get('clue') and state.get('clue') != 'None':
+                base += f"相关线索：{state['clue']}。"
             if state.get('dice_result'):
                 base += f"已应用骰子结果（{state['dice_result']}）。"
             base += '接下来会发生什么？'
@@ -1824,10 +1216,8 @@ class NarrativeAgent:
         base = f"You act: {user_input}. "
         if state.get('plot_goal'):
             base += f"The story advances toward: {state['plot_goal']}. "
-        if state.get('retrieved_docs'):
-            base += f"Relevant clue: {state['retrieved_docs'][0]['content']}. "
-        if state.get('resolved_check_summary'):
-            base += f"Resolved check: {state['resolved_check_summary']}. "
+        if state.get('clue') and state.get('clue') != 'None':
+            base += f"Relevant clue: {state['clue']}. "
         if state.get('dice_result'):
             base += f"Dice result applied ({state['dice_result']}). "
         if state.get('skill_check_result'):
@@ -1835,64 +1225,35 @@ class NarrativeAgent:
         base += 'What do you do next?'
         return base
 
-    def _get_previous_scene_summary(self, scene_id: str) -> str:
-        scenes = self.db.list_scenes()
-        current_idx = next((i for i, s in enumerate(scenes) if s.get('scene_id') == scene_id), -1)
-        if current_idx <= 0:
-            return ''
-        previous_scene = scenes[current_idx - 1]
-        previous_scene_id = previous_scene.get('scene_id', '')
-        if not previous_scene_id:
-            return ''
-        return self.db.get_summary('scene', scene_id=previous_scene_id) or previous_scene.get('scene_summary', '') or ''
-
     def _generate_scene_opening(self, scene_id: str, plot_id: str) -> str:
         scene = self.db.get_scene(scene_id) or {}
         plot = self.db.get_plot(plot_id) or {}
-        previous_scene_summary = self._get_previous_scene_summary(scene_id)
         output_language = self._get_output_language()
-        plot_excerpt = str(plot.get('raw_text', ''))
-        system_state = self.db.get_system_state()
-        transition_context = story_position_context(
-            self.db,
-            scene_id,
-            plot_id,
-            navigation_state=system_state.get('navigation_state'),
-            current_visit_id=int(system_state.get('current_visit_id', 0) or 0),
-        )
-        opening_choice_allowed = bool(transition_context.get('opening_choice_allowed', False))
-        eligible_targets_summary = transition_context.get('eligible_targets_summary', 'None')
-        transition_context_summary = transition_context.get('transition_context_summary', 'None')
         prompt = f"""
 You are a TRPG Keeper.
 
-Write the opening narration for a new scene or plot.
+Write the opening narration for the beginning of the story.
 
 Guidelines:
-- Transition smoothly from the previous scene or plot into the current situation.
 - Describe the immediate environment, situation, NPC dialogue, and NPC actions in a vivid and immersive way.
 - Focus only on what is happening right now.
 - Reveal information gradually. Do not provide too much information at once; encourage player exploration and role-play.
 - Present the situation, then STOP and wait for the player to decide what to do next.
+- Avoid meta commentary. Do not mention scene IDs, scene names, or any system-level information.
 - Do NOT reveal future events or the full storyline.
 - Do NOT decide the player character’s actions or thoughts.
 - Do NOT ask hook questions.
-- Do NOT invent a new branch menu or binary choice unless Opening Choice Allowed is true.
-- If Opening Choice Allowed is false, end with grounded scene framing instead of an explicit menu of options.
 - Write the opening entirely in {output_language}.
 
 
 Scene ID: {scene_id}
+Scene Name: {scene.get('scene_name', '')}
 Scene Goal: {scene.get('scene_goal', '')}
 Scene Description: {scene.get('scene_description', '')}
-Plot ID: {plot_id}
+Plot Name: {plot.get('plot_name', '')}
 Plot Goal: {plot.get('plot_goal', '')}
-Current Plot Excerpt: {plot_excerpt}
+Current Plot Raw Text: {truncate_plot_raw_text(plot.get('raw_text', '')) or 'None'}
 Player Profile: {self.db.get_player_profile()}
-Previous Scene Summary: {previous_scene_summary or 'None'}
-Latest Transition Context: {transition_context_summary}
-Eligible Targets: {eligible_targets_summary}
-Opening Choice Allowed: {str(opening_choice_allowed).lower()}
 """
         self._record_prompt(None, 'scene_opening_prompt', prompt)
         try:
@@ -1901,57 +1262,36 @@ Opening Choice Allowed: {str(opening_choice_allowed).lower()}
                 return result
         except Exception:
             pass
+        scene_label = scene.get('scene_name', '') or scene_id
+        plot_label = plot.get('plot_name', '') or plot.get('plot_goal', 'advance the story')
         if output_language == 'Chinese':
             return (
-                f"夜色笼罩着{scene_id}。你感到命运的下一条线索正在将你向前牵引。\n"
-                f"你当前的直接目标是：{plot.get('plot_goal', '推进剧情')}。\n"
+                f"夜色笼罩着{scene_label}。你感到命运的下一条线索正在将你向前牵引。\n"
+                f"你当前的直接目标是：{plot_label}。\n"
                 "你从哪里开始？"
             )
         return (
-            f"Night settles over {scene_id}. You sense the next thread of fate pulling you forward.\n"
-            f"Your immediate objective: {plot.get('plot_goal', 'advance the story')}.\n"
+            f"Night settles over {scene_label}. You sense the next thread of fate pulling you forward.\n"
+            f"Your immediate objective: {plot_label}.\n"
             "Where do you begin?"
         )
 
-    def _build_plot_summary(self, state: NarrativeState) -> str:
-        tail = state.get('conversation_history', [])[-8:]
+    def _build_plot_summary(self, state: NarrativeState, *, previous: bool = False) -> str:
+        tail = (state.get('global_conversation_history', []) if previous else state.get('conversation_history', []))[-8:]
         history_text = '\n'.join([f"User: {t.get('user', '')}\nAgent: {t.get('agent', '')}" for t in tail])
-        plot_excerpt = state.get('current_plot_raw_text', '')
-        transition_label = self._target_descriptor(
-            str(state.get('plot_advance_target_kind', '')),
-            str(state.get('plot_advance_target_id', '')),
-        )
+        scene_id = state.get('previous_scene_id', '') if previous else state.get('scene_id', '')
+        plot_id = state.get('previous_plot_id', '') if previous else state.get('plot_id', '')
+        plot_goal = state.get('previous_plot_goal', '') if previous else state.get('plot_goal', '')
         prompt = f"""
-Summarize the completed plot as durable narrative memory for future turns.
+Summarize the plot before a player-driven branch switch in 3 bullet points.
+Focus on:
+1) what happened
+2) key clues
+3) character changes
 
-Return 5 to 7 bullet points.
-
-Requirements:
-- Preserve concrete, reusable information instead of vague recap.
-- If the plot presented options or branches, list the exact options that mattered.
-- State which option or branch the player actually entered or committed to.
-- Preserve any branch logic or conditions that still matter later.
-- Preserve key clues, NPC attitudes, revealed facts, and unresolved leads.
-- Prefer exact named places, people, clues, options, and branch labels from the source when available.
-- Do not write generic bullets like "the plot progressed" unless followed by specifics.
-
-Scene: {state.get('scene_id', '')}
-Plot: {state.get('plot_id', '')}
-Plot Goal: {state.get('plot_goal', '')}
-Plot Advance Action: {state.get('plot_advance_action', 'stay')}
-Plot Advance Target: {transition_label}
-Close Current Plot: {str(bool(state.get('plot_advance_close_current', False))).lower()}
-Plot Advance Reason: {state.get('plot_advance_reason', '') or 'None'}
-Allowed Targets:
-{state.get('allowed_targets_summary', 'None')}
-Remaining Required Targets:
-{state.get('remaining_required_targets_summary', 'None')}
-Return Target:
-{state.get('return_target_summary', 'None')}
-Visited Scene Branches: {self._list_summary(state.get('visited_scene_ids', []))}
-Visited Plot Branches: {self._list_summary(state.get('visited_plot_ids', []))}
-Current Plot Excerpt:
-{plot_excerpt}
+Scene: {scene_id}
+Plot: {plot_id}
+Plot Goal: {plot_goal}
 Latest Turn User: {state.get('latest_user_input', '')}
 Latest Turn Agent: {state.get('response', '')}
 Recent History:
@@ -1964,71 +1304,29 @@ Recent History:
                 return summary
         except Exception:
             pass
-        bullets = [
-            f"- Plot goal: {state.get('plot_goal', 'None')}",
-            f"- Transition decision: {state.get('plot_advance_action', 'stay')} -> {transition_label} ({state.get('plot_advance_reason', 'no explicit reason')})",
-            f"- Close current plot: {bool(state.get('plot_advance_close_current', False))}",
-            f"- Latest player action: {state.get('latest_user_input', '') or 'None'}",
-            f"- Latest keeper response: {state.get('response', '') or 'None'}",
-        ]
-        if state.get('allowed_targets_summary'):
-            bullets.append(f"- Allowed targets at resolution: {state['allowed_targets_summary']}")
-        if state.get('remaining_required_targets_summary') and state.get('remaining_required_targets_summary') != 'None':
-            bullets.append(f"- Remaining required targets when resolved: {state['remaining_required_targets_summary']}")
-        if state.get('return_target_summary') and state.get('return_target_summary') != 'None':
-            bullets.append(f"- Return target: {state['return_target_summary']}")
-        if state.get('visited_scene_ids'):
-            bullets.append(f"- Visited scene branches: {self._list_summary(state['visited_scene_ids'])}")
-        if state.get('visited_plot_ids'):
-            bullets.append(f"- Visited plot branches: {self._list_summary(state['visited_plot_ids'])}")
-        if plot_excerpt and plot_excerpt != 'None':
-            bullets.append(f"- Plot excerpt / options context: {plot_excerpt}")
-        return '\n'.join(bullets)
-
-    def _first_summary_fact(self, text: str) -> str:
-        for line in str(text or '').splitlines():
-            cleaned = line.strip().lstrip('-').strip()
-            if cleaned:
-                return cleaned
-        return ''
+        return f"Plot {plot_id} was left after player-driven branch movement from: {plot_goal or 'the active plot'}."
 
     def _build_scene_summary(self, scene_id: str, state: NarrativeState | None = None) -> str:
         scene = self.db.get_scene(scene_id) or {}
         plots = scene.get('plots', [])
         plot_lines = '\n'.join(
             [
-                f"- {p.get('plot_id')}: goal={p.get('plot_goal', '')}, progress={p.get('progress', 0)}, status={p.get('status', '')}"
-                for p in plots
-            ]
-        )
-        plot_summary_lines = '\n'.join(
-            [
-                f"- {p.get('plot_id')}: status={p.get('status', '')}; summary={self.db.get_summary('plot', scene_id=scene_id, plot_id=str(p.get('plot_id', ''))) or 'None'}"
+                f"- {p.get('plot_id')}: goal={p.get('plot_goal', '')}"
                 for p in plots
             ]
         )
         prompt = f"""
-Summarize a completed scene in 4 bullet points.
+Summarize a scene before a player-driven branch switch in 4 bullet points.
 Include:
 - core conflict
 - emotional shift
 - gained information
 - narrative turning point
 
-Rules:
-- Treat skipped plots as unchosen. They did not happen.
-- Use completed plot summaries as the source of truth for what actually occurred.
-- Do not infer hidden revelations from skipped or unvisited plots.
-
 Scene: {scene_id}
 Scene Goal: {scene.get('scene_goal', '')}
-Scene Node Kind: {scene.get('node_kind', 'linear')}
-Scene Completion Reason: {(state or {}).get('scene_completion_reason', '') or 'None'}
 Plots:
 {plot_lines}
-
-Completed / Skipped Plot Summaries:
-{plot_summary_lines}
 """
         self._record_prompt(state, 'scene_summary_prompt', prompt)
         try:
@@ -2037,4 +1335,6 @@ Completed / Skipped Plot Summaries:
                 return summary
         except Exception:
             pass
-        return f"Scene {scene_id} completed with major progress toward: {scene.get('scene_goal', '')}"
+        return f"Scene {scene_id} was left after player-driven branch movement from: {scene.get('scene_goal', '')}"
+
+

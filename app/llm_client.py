@@ -53,7 +53,7 @@ def _step_max_tokens(step_name: str, default_max_tokens: int) -> int:
         "scene_summary_generation",
     }:
         return min(default_max_tokens, 768)
-    if step in {"generate_response"}:
+    if step in {"generate_response", "parser_extract"}:
         return min(default_max_tokens, 1536)
     return default_max_tokens
 
@@ -322,7 +322,11 @@ def _call_openai_llm(
 
     max_retries = int(os.getenv("OPENAI_MAX_RETRIES", str(max_retries)))
     max_tokens = _step_max_tokens(step_name, int(os.getenv("OPENAI_MAX_TOKENS", "2048")))
-    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.6"))
+    temperature = (
+        0.1
+        if str(step_name or "").strip().lower() == "branch_transition_decision"
+        else float(os.getenv("OPENAI_TEMPERATURE", "0.6"))
+    )
     top_p = float(os.getenv("OPENAI_TOP_P", "0.95"))
 
     headers = {
@@ -334,6 +338,7 @@ def _call_openai_llm(
     payload: dict[str, object] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
+        "max_completion_tokens": max_tokens,
         "temperature": temperature,
         "top_p": top_p,
         "stream": False,
@@ -453,7 +458,11 @@ def _call_nvidia_llm(
 
     max_retries = int(os.getenv("NVIDIA_MAX_RETRIES", str(max_retries)))
     max_tokens = _step_max_tokens(step_name, int(os.getenv("NVIDIA_MAX_TOKENS", "4096")))
-    temperature = float(os.getenv("NVIDIA_TEMPERATURE", "0.6"))
+    temperature = (
+        0.1
+        if str(step_name or "").strip().lower() == "branch_transition_decision"
+        else float(os.getenv("NVIDIA_TEMPERATURE", "0.6"))
+    )
     top_p = float(os.getenv("NVIDIA_TOP_P", "0.95"))
     top_k = int(os.getenv("NVIDIA_TOP_K", "20"))
     presence_penalty = float(os.getenv("NVIDIA_PRESENCE_PENALTY", "0"))

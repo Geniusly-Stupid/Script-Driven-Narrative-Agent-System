@@ -79,28 +79,6 @@ class ChromaStore:
     def add_from_scenes(self, scenes: list[dict], knowledge: list[dict] | None = None) -> None:
         docs: list[dict] = []
 
-        for scene in scenes:
-            scene_id = scene.get('scene_id', '')
-            for plot in scene.get('plots', []):
-                plot_id = plot.get('plot_id', '')
-                for npc in plot.get('npc', []):
-                    docs.append(
-                        {
-                            'type': 'npc',
-                            'name': npc,
-                            'description': f"NPC {npc} in {scene_id}/{plot_id}",
-                            'metadata': {'scene_id': scene_id, 'plot_id': plot_id},
-                        }
-                    )
-                for location in plot.get('locations', []):
-                    docs.append(
-                        {
-                            'type': 'location',
-                            'name': location,
-                            'description': f"Location {location} in {scene_id}/{plot_id}",
-                            'metadata': {'scene_id': scene_id, 'plot_id': plot_id},
-                        }
-                    )
         for item in knowledge or []:
             knowledge_type = str(item.get('knowledge_type', 'other')).strip().lower() or 'other'
             mapped_type = self._map_knowledge_type_to_doc_type(knowledge_type)
@@ -119,8 +97,6 @@ class ChromaStore:
                     'metadata': {
                         'knowledge_id': item.get('knowledge_id', ''),
                         'knowledge_type': knowledge_type,
-                        'source_page_start': int(item.get('source_page_start', 1)),
-                        'source_page_end': int(item.get('source_page_end', item.get('source_page_start', 1))),
                     },
                 }
             )
@@ -152,9 +128,13 @@ class ChromaStore:
         return f"{doc.get('type', 'doc')}::{digest}::{idx}"
 
     def _map_knowledge_type_to_doc_type(self, knowledge_type: str) -> str:
-        if knowledge_type in {'npc', 'location', 'rule', 'item', 'clue'}:
-            return knowledge_type
-        return 'world_context'
+        if knowledge_type == 'npc':
+            return 'npc'
+        if knowledge_type == 'clue':
+            return 'clue'
+        if knowledge_type == 'setting':
+            return 'setting'
+        return 'other'
 
     def search(self, query: str, k: int = 5) -> list[dict]:
         query_embedding = self.embedding_fn.embed_query(query)
