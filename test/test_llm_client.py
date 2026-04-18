@@ -14,6 +14,7 @@ def main() -> int:
         assert _step_max_tokens('check_whether_roll_dice', 4096) == 256
         assert _step_max_tokens('generate_retrieval_queries', 4096) == 512
         assert _step_max_tokens('plot_completion_evaluation', 4096) == 768
+        assert _step_max_tokens('reflection_planning_generation', 4096) == 768
 
         print('[test_llm_client] case 2: narrative generation should no longer request the full 4k budget by default')
         assert _step_max_tokens('generate_response', 4096) == 1536

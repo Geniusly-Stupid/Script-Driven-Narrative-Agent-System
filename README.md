@@ -437,8 +437,7 @@ Open the URL shown by Streamlit (usually `http://localhost:8501`).
 
 ## Debug Scripts
 
-A new `test/` directory has been added.
-These scripts all use **mock inputs + print outputs**, allowing you to manually verify whether the results match expectations.
+A `test/` directory has been added. These scripts all use **mock inputs + print outputs**, allowing you to manually verify whether the results match expectations.
 
 Directory contents:
 
@@ -449,28 +448,21 @@ Directory contents:
   ⚠️ **All LLM invocation logic in the project must stay aligned with this file.**
 
   Any changes to request payload, headers, or streaming parsing should be validated here first.
-* `test/test_init.py`: Tests importing `app/__init__.py`
-* `test/test_database.py`: Tests `app/database.py` (database creation, insert, read, state updates)
-* `test/test_parser.py`: Tests `app/parser.py` (Markdown parsing and scene/plot extraction)
+* `test/test_llm_client.py`: Tests `app/llm_client.py` helper logic (step token caps and retry/backoff behavior).
 * `test/test_rag.py`: Tests `app/rag.py` (query generation and knowledge classification)
 * `test/test_rules_loader.py`: Tests `app/rules_loader.py` (loading `database/GameRules.md` into knowledge chunks)
-* `test/test_state.py`: Legacy progression test harness kept under `test/`
 * `test/test_vector_store.py`: Tests `app/vector_store.py` (insertion and retrieval)
-* `test/test_agent_graph.py`: Tests `app/agent_graph.py` (complete single-turn workflow)
-* `test/test_main.py`: Tests `main.py` import and entry-point availability
-* `test/run_all.py`: Executes all test scripts sequentially
+* `test/test_read_db.py`: Tests the SQLite inspection utility by generating a sample database and validating the exported dump.
+* `test/read_db.py`: Utility script for inspecting `narrative.db` and exporting a readable text dump.
+* `test/read_chroma.py`: Utility script for printing the current Chroma collection contents.
 
 Run individually:
 
 ```bash
 python test/test_llm_generate.py
-python test/test_database.py
-python test/test_parser.py
-python test/test_agent_graph.py
-```
-
-Run all at once:
-
-```bash
-python test/run_all.py
+python test/test_llm_client.py
+python test/test_rag.py
+python test/test_rules_loader.py
+python test/test_vector_store.py
+python test/test_read_db.py
 ```

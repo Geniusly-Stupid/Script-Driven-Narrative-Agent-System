@@ -51,6 +51,7 @@ def _step_max_tokens(step_name: str, default_max_tokens: int) -> int:
         "scene_completion_evaluation",
         "plot_summary_generation",
         "scene_summary_generation",
+        "reflection_planning_generation",
     }:
         return min(default_max_tokens, 768)
     if step in {"generate_response", "parser_extract"}:

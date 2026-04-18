@@ -591,6 +591,9 @@ def _ensure_default_skill_lines(skill_lines: list[str]) -> list[str]:
     if 'fighting' not in seen:
         # Default Fighting: 20
         normalized.append('Fighting:20')
+    if 'luck' not in seen:
+        # Default Luck: 50
+        normalized.append('Luck:50')
     return normalized
 
 

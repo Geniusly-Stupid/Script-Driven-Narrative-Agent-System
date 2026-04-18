@@ -189,7 +189,8 @@ Update the global story summary.
 
 Requirements:
 - The final summary must be 3–4 sentences in total
-- Focus on main storyline, key actions, and discoveries
+- Focus on main storyline, key actions, and important discoveries
+- Explain the core mystery or key conflict of the story
 - If existing summary is not empty, refine and compress it while incorporating new information
 - Avoid repeating content
 - Keep the summary concise and coherent

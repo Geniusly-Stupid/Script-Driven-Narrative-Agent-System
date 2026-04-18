@@ -210,6 +210,24 @@ Recent Conversation:
 
 ---
 
+# REFLECTION & PLANING
+
+Reflection Evaluation:
+This is a high-level reflection updated approximately every 3 turns.
+It may be outdated or incomplete. Use it only as a reference, not as ground truth.
+Do not override the current plot, recent conversation, or explicit user actions based on this.
+
+{reflection_evaluation}
+
+Reflection Guidance:
+Use guidance implicitly, primarily through NPC behavior or environmental hints.
+If necessary, provide gentle guidance in brief parenthetical cues at the end of the response.
+Do NOT expose guidance directly, and avoid breaking immersion or suspense.
+
+{reflection_guidance}
+
+---
+
 # RETRIEVED KNOWLEDGE
 
 NPC:
@@ -471,6 +489,12 @@ Do not switch to content that significantly deviates from the main progression.
 
 {script_summary}
 
+Reflection Guidance:
+This is a weak suggestion. Do not override user intent or current plot raw text.
+Use it only as a directional hint when consistent with the current narrative state.
+
+{reflection_guidance}
+
 ---
 Current Scene:
 {current_scene}
@@ -526,6 +550,52 @@ Output:
 Updated long-term memory (<= 4 sentences, cumulative and state-focused).
 """
 
+REFLECTION_PLANNING_PROMPT_TEMPLATE = """You are a high-level narrative controller.
+
+Analyze the current story state and produce guidance for future progression.
+
+Tasks:
+1. Determine whether the currently collected clues are sufficient to reason about the key conflict. If not, identify what is missing.
+2. Evaluate whether the Keeper's guidance in the recent conversation is effective.
+3. Propose how to guide the player toward the main storyline.
+
+Constraints:
+- Guidance must not override explicit user actions.
+- Guidance must remain consistent with the current plot and known facts.
+- Keep output concise and actionable.
+
+Output (STRICT JSON):
+{{
+  "missing_info": "...",
+  "evaluation": "...",
+  "guidance": "..."
+}}
+
+Recent Conversation (last 3 rounds):
+{recent_conversation}
+
+Previous Reflection & Planning:
+{reflection_planning}
+
+Long-term Memory:
+{current_long_term_memory}
+
+Global Story Summary:
+{script_summary}
+
+Current Scene:
+{current_scene_name}
+
+Unvisited Scenes:
+{unvisited_scene_name}
+
+Visited Scenes:
+{visited_scene_name}
+
+Unvisited Plots:
+{unvisited_plot_name}
+"""
+
 KP_OPENING_MARKER = '[KP_OPENING]'
 
 
@@ -570,6 +640,10 @@ class NarrativeState(TypedDict, total=False):
     previous_scene_goal: str
     previous_plot_goal: str
     output_language: str
+    reflection_planning: str
+    reflection_missing_info: str
+    reflection_evaluation: str
+    reflection_guidance: str
     debug_prompts: list[dict[str, str]]
 
 
@@ -645,6 +719,10 @@ class NarrativeAgent:
             'visited_plots': [],
             'transition_switch': False,
             'transition_target_plot_id': '',
+            'reflection_planning': '',
+            'reflection_missing_info': '',
+            'reflection_evaluation': '',
+            'reflection_guidance': '',
             'debug_prompts': [],
         }
         result = self.graph.invoke(state)
@@ -765,6 +843,18 @@ class NarrativeAgent:
             return {}
         return data
 
+    def _parse_reflection_planning(self, text: str) -> dict[str, str]:
+        match = re.search(r'\{.*\}', text, flags=re.DOTALL)
+        payload = match.group(0) if match else text
+        data = json5.loads(payload)
+        if not isinstance(data, dict):
+            return {}
+        return {
+            'missing_info': str(data.get('missing_info', '') or '').strip(),
+            'evaluation': str(data.get('evaluation', '') or '').strip(),
+            'guidance': str(data.get('guidance', '') or '').strip(),
+        }
+
     def _json_dumps(self, value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
 
@@ -823,6 +913,10 @@ class NarrativeAgent:
         state['visited_scenes'] = [str(item) for item in visited_scenes if str(item)]
         state['visited_plots'] = [str(item) for item in visited_plots if str(item)]
         state['long_term_memory'] = str(nav.get('long_term_memory', '') or '')
+        state['reflection_planning'] = str(nav.get('reflection_planning', '') or '')
+        state['reflection_missing_info'] = str(nav.get('reflection_missing_info', '') or '')
+        state['reflection_evaluation'] = str(nav.get('reflection_evaluation', '') or '')
+        state['reflection_guidance'] = str(nav.get('reflection_guidance', '') or '')
 
     def _save_visited_state(self, state: NarrativeState) -> None:
         navigation_state = self.db.get_system_state().get('navigation_state', {}) or {}
@@ -832,6 +926,18 @@ class NarrativeAgent:
                 'visited_plots': sorted(set(state.get('visited_plots', []))),
                 'long_term_memory': str(
                     state.get('long_term_memory', navigation_state.get('long_term_memory', '')) or ''
+                ),
+                'reflection_planning': str(
+                    state.get('reflection_planning', navigation_state.get('reflection_planning', '')) or ''
+                ),
+                'reflection_missing_info': str(
+                    state.get('reflection_missing_info', navigation_state.get('reflection_missing_info', '')) or ''
+                ),
+                'reflection_evaluation': str(
+                    state.get('reflection_evaluation', navigation_state.get('reflection_evaluation', '')) or ''
+                ),
+                'reflection_guidance': str(
+                    state.get('reflection_guidance', navigation_state.get('reflection_guidance', '')) or ''
                 ),
             }
         )
@@ -860,6 +966,22 @@ class NarrativeAgent:
         state['current_plot_raw_text'] = ''
         state['previous_plot_summary'] = ''
         state['script_summary'] = self.db.get_summary('script')
+        global_reflection_planning = self.db.get_summary('reflection_planning')
+        effective_reflection = global_reflection_planning or state.get('reflection_planning', '') or ''
+        state['reflection_planning'] = effective_reflection
+        parsed_reflection: dict[str, str] = {
+            'missing_info': str(state.get('reflection_missing_info', '') or ''),
+            'evaluation': str(state.get('reflection_evaluation', '') or ''),
+            'guidance': str(state.get('reflection_guidance', '') or ''),
+        }
+        if effective_reflection:
+            try:
+                parsed_reflection = self._parse_reflection_planning(effective_reflection)
+            except Exception:
+                parsed_reflection = parsed_reflection if any(parsed_reflection.values()) else {}
+        state['reflection_missing_info'] = parsed_reflection.get('missing_info', '')
+        state['reflection_evaluation'] = parsed_reflection.get('evaluation', '')
+        state['reflection_guidance'] = parsed_reflection.get('guidance', '')
         if not scene:
             return
         state['scene_name'] = scene.get('scene_name', '')
@@ -893,6 +1015,7 @@ class NarrativeAgent:
             global_recent_conversation=self._format_recent_conversation(branch_history, rounds=3),
             script_summary=state.get('script_summary', '') or 'None',
             long_term_memory=state.get('long_term_memory', '') or 'None',
+            reflection_guidance=state.get('reflection_guidance', '') or 'None',
             current_plot_raw_text=state.get('current_plot_raw_text', '') or 'None',
             current_scene=self._json_dumps(self._scene_brief(current_scene)),
             unvisited_scenes=self._json_dumps([self._scene_brief(scene) for scene in scenes if str(scene.get('scene_id', '')) not in visited_scenes]),
@@ -1095,6 +1218,8 @@ class NarrativeAgent:
                 previous_plot_summary=state.get('previous_plot_summary', '') or 'None',
                 current_scene_summary=state.get('current_scene_summary', '') or 'None',
                 long_term_memory=state.get('long_term_memory', '') or 'None',
+                reflection_evaluation=state.get('reflection_evaluation', '') or 'None',
+                reflection_guidance=state.get('reflection_guidance', '') or 'None',
                 script_summary=state.get('script_summary', '') or 'None',
                 recent_conversation=recent_conversation,
                 npc_related_info=categorized['npc_related_info'],
@@ -1132,6 +1257,7 @@ class NarrativeAgent:
                 self.db.update_scene(state.get('previous_scene_id', ''), {'scene_summary': scene_summary})
                 self.db.save_summary('scene', scene_summary, scene_id=state.get('previous_scene_id', ''))
         self._update_long_term_memory(state)
+        self._update_reflection_planning(state)
         self._save_visited_state(state)
         return state
 
@@ -1157,6 +1283,56 @@ class NarrativeAgent:
             return
         if updated_memory:
             state['long_term_memory'] = updated_memory
+
+    def _update_reflection_planning(self, state: NarrativeState) -> None:
+        row = self.db.conn.execute(
+            "SELECT COUNT(*) AS turn_count FROM memory WHERE user <> ?",
+            (KP_OPENING_MARKER,),
+        ).fetchone()
+        turn_count = int(row['turn_count']) if row else 0
+        if turn_count <= 0 or turn_count % 3 != 0:
+            return
+
+        scenes = self.db.list_scenes()
+        visited_scene_ids = set(state.get('visited_scenes', []))
+        visited_plot_ids = set(state.get('visited_plots', []))
+        current_scene = self.db.get_scene(state.get('scene_id', '')) or {}
+        current_scene_plots = current_scene.get('plots', []) if current_scene else []
+        prompt = REFLECTION_PLANNING_PROMPT_TEMPLATE.format(
+            recent_conversation=self._format_recent_conversation(self.db.get_global_recent_turns(limit=3), rounds=3),
+            reflection_planning=state.get('reflection_planning', '') or 'None',
+            current_long_term_memory=state.get('long_term_memory', '') or 'None',
+            script_summary=state.get('script_summary', '') or 'None',
+            current_scene_name=state.get('scene_name', '') or 'None',
+            unvisited_scene_name=self._format_scene_names(
+                [scene for scene in scenes if str(scene.get('scene_id', '')) not in visited_scene_ids]
+            ),
+            visited_scene_name=self._format_scene_names(
+                [scene for scene in scenes if str(scene.get('scene_id', '')) in visited_scene_ids]
+            ),
+            unvisited_plot_name=self._format_scene_names(
+                [
+                    {'scene_name': plot.get('plot_name', '') or plot.get('plot_id', '')}
+                    for plot in current_scene_plots
+                    if str(plot.get('plot_id', '')) not in visited_plot_ids
+                ]
+            ),
+        )
+        self._record_prompt(state, 'reflection_planning_prompt', prompt)
+        try:
+            raw = self._llm_call(prompt, step_name='reflection_planning_generation')
+            parsed = self._parse_reflection_planning(raw)
+        except Exception as exc:
+            logger.error("Reflection planning update failed error=%s", exc)
+            return
+        if not parsed:
+            return
+        reflection_json = json.dumps(parsed, ensure_ascii=False)
+        self.db.save_summary('reflection_planning', reflection_json)
+        state['reflection_planning'] = reflection_json
+        state['reflection_missing_info'] = parsed.get('missing_info', '')
+        state['reflection_evaluation'] = parsed.get('evaluation', '')
+        state['reflection_guidance'] = parsed.get('guidance', '')
 
     def _roll_dice_expr(self, dice_expr: str) -> str | None:
         m = re.fullmatch(r'\s*(\d*)d(\d+)\s*', (dice_expr or '').lower())
