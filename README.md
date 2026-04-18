@@ -430,47 +430,25 @@ streamlit run main.py
 
 Open the URL shown by Streamlit (usually `http://localhost:8501`).
 
+You can use the provided `sample_script` to understand and test the system behavior.
+
 ## Notes
 
 - This project is designed for local standalone execution.
 - All state is persisted locally (`narrative.db` and `.chroma/`).
 
-## Debug Scripts
+## Debug
 
-A new `test/` directory has been added.
-These scripts all use **mock inputs + print outputs**, allowing you to manually verify whether the results match expectations.
+A `test/` directory is included for debugging and basic module checks.  
+However, **many of these scripts are outdated** and may not reflect the current system behavior.
 
-Directory contents:
+Treat them as **reference-only utilities**, not as the source of truth for the actual pipeline.
 
-* `test/test_llm_generate.py`: Tests the raw LLM API call (streaming behavior, thinking/reasoning/content parsing).
-  
-  ⚠️ **Before running this test, make sure API keys are configured as described in the Setup section** (`api_key.txt` / env vars).
+For debugging, rely primarily on:
 
-  ⚠️ **All LLM invocation logic in the project must stay aligned with this file.**
+- **UI behavior**
+- **Streamlit displayed information**
+- **the `debug_mode` feature (left sidebar in Streamlit)**
+- **runtime logs / printed messages in the app**
 
-  Any changes to request payload, headers, or streaming parsing should be validated here first.
-* `test/test_init.py`: Tests importing `app/__init__.py`
-* `test/test_database.py`: Tests `app/database.py` (database creation, insert, read, state updates)
-* `test/test_parser.py`: Tests `app/parser.py` (Markdown parsing and scene/plot extraction)
-* `test/test_rag.py`: Tests `app/rag.py` (query generation and knowledge classification)
-* `test/test_rules_loader.py`: Tests `app/rules_loader.py` (loading `database/GameRules.md` into knowledge chunks)
-* `test/test_state.py`: Legacy progression test harness kept under `test/`
-* `test/test_vector_store.py`: Tests `app/vector_store.py` (insertion and retrieval)
-* `test/test_agent_graph.py`: Tests `app/agent_graph.py` (complete single-turn workflow)
-* `test/test_main.py`: Tests `main.py` import and entry-point availability
-* `test/run_all.py`: Executes all test scripts sequentially
-
-Run individually:
-
-```bash
-python test/test_llm_generate.py
-python test/test_database.py
-python test/test_parser.py
-python test/test_agent_graph.py
-```
-
-Run all at once:
-
-```bash
-python test/run_all.py
-```
+These are more reliable for understanding the current execution flow and system state.
